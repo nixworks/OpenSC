@@ -147,9 +147,9 @@ const CK_BYTE gostr3410_paramset_C_encoded_oid[] = { 0x06, 0x07, 0x2a, 0x85, 0x0
 const unsigned int gostr3410_paramset_C_oid[] = {1, 2, 643, 2, 2, 35, 3, (unsigned int)-1};
 
 static const struct {
-	const CK_BYTE *p_encoded_oid;
+	const CK_BYTE *encoded_oid;
 	const int encoded_oid_size;
-	const unsigned int *p_oid;
+	const unsigned int *oid;
 	const int oid_size;
 	unsigned char oid_id;
 } gostr3410_param_oid [] = {
@@ -174,9 +174,9 @@ const CK_BYTE gostr3411_94_cryptopro_paramset_encoded_oid[] = { 0x06, 0x07, 0x2a
 const unsigned int gostr3411_94_cryptopro_paramset_oid[] = {1, 2, 643, 2, 2, 30, 1, (unsigned int)-1};
 
 static const struct {
-	const CK_BYTE *p_encoded_oid;
+	const CK_BYTE *encoded_oid;
 	const int encoded_oid_size;
-	const unsigned int *p_oid;
+	const unsigned int *oid;
 	const int oid_size;
 } gostr3410_hash_param_oid [] = {
 	{ &gostr3411_94_cryptopro_paramset_encoded_oid[0],
@@ -2689,7 +2689,7 @@ set_gost3410_params(struct sc_pkcs15init_prkeyargs *prkey_args,
 		for (param_index = 0; param_index < nn; ++param_index) {
 			if (len != gostr3410_param_oid[param_index].encoded_oid_size)
 				continue;
-			if (!memcmp(gost_params_encoded_oid_from_template, gostr3410_param_oid[param_index].p_encoded_oid, len))
+			if (!memcmp(gost_params_encoded_oid_from_template, gostr3410_param_oid[param_index].encoded_oid, len))
 				break;
 		}
 
@@ -2715,7 +2715,7 @@ set_gost3410_params(struct sc_pkcs15init_prkeyargs *prkey_args,
 		for (hash_index = 0; hash_index < nn; ++hash_index) {
 			if (len != gostr3410_hash_param_oid[hash_index].encoded_oid_size)
 				continue;
-			if (!memcmp(gost_hash_params_encoded_oid_from_template, gostr3410_hash_param_oid[hash_index].p_encoded_oid, len))
+			if (!memcmp(gost_hash_params_encoded_oid_from_template, gostr3410_hash_param_oid[hash_index].encoded_oid, len))
 				break;
 		}
 
@@ -2733,19 +2733,19 @@ set_gost3410_params(struct sc_pkcs15init_prkeyargs *prkey_args,
 	if (prkey_args) {
 		(prkey_args->params).gost.gostr3410 = gostr3410_param_oid[param_index].oid_id;
 		memcpy(&(prkey_args->key).u.gostr3410.params.key,
-			gostr3410_param_oid[param_index].p_oid,
+			gostr3410_param_oid[param_index].oid,
 			gostr3410_param_oid[param_index].oid_size);
 		memcpy(&(prkey_args->key).u.gostr3410.params.hash,
-			gostr3410_hash_param_oid[hash_index].p_oid,
+			gostr3410_hash_param_oid[hash_index].oid,
 			gostr3410_hash_param_oid[hash_index].oid_size);
 	}
 	if (pubkey_args) {
 		(pubkey_args->params).gost.gostr3410 = gostr3410_param_oid[param_index].oid_id;
 		memcpy(&(pubkey_args->key).u.gostr3410.params.key,
-			gostr3410_param_oid[param_index].p_oid,
+			gostr3410_param_oid[param_index].oid,
 			gostr3410_param_oid[param_index].oid_size);
 		memcpy(&(pubkey_args->key).u.gostr3410.params.hash,
-			gostr3410_hash_param_oid[hash_index].p_oid,
+			gostr3410_hash_param_oid[hash_index].oid,
 			gostr3410_hash_param_oid[hash_index].oid_size);
 	}
 
@@ -4540,7 +4540,7 @@ get_gostr3410_params(const u8 *params, size_t params_len, CK_ATTRIBUTE_PTR attr)
 	for (i = 0; i < sizeof(gostr3410_param_oid)/sizeof(gostr3410_param_oid[0]); ++i) {
 		if (gostr3410_param_oid[i].oid_id == ((int*)params)[0]) {
 			check_attribute_buffer(attr, gostr3410_param_oid[i].encoded_oid_size);
-			memcpy(attr->pValue, gostr3410_param_oid[i].p_encoded_oid,
+			memcpy(attr->pValue, gostr3410_param_oid[i].encoded_oid,
 					gostr3410_param_oid[i].encoded_oid_size);
 			return CKR_OK;
 		}
