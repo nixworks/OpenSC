@@ -148,9 +148,9 @@ const unsigned int gostr3410_paramset_C_oid[] = {1, 2, 643, 2, 2, 35, 3, (unsign
 
 static const struct {
 	const CK_BYTE *encoded_oid;
-	const int encoded_oid_size;
+	const unsigned int encoded_oid_size;
 	const unsigned int *oid;
-	const int oid_size;
+	const unsigned int oid_size;
 	unsigned char oid_id;
 } gostr3410_param_oid [] = {
 	{ &gostr3410_paramset_A_encoded_oid[0],
@@ -175,9 +175,9 @@ const unsigned int gostr3411_94_cryptopro_paramset_oid[] = {1, 2, 643, 2, 2, 30,
 
 static const struct {
 	const CK_BYTE *encoded_oid;
-	const int encoded_oid_size;
+	const unsigned int encoded_oid_size;
 	const unsigned int *oid;
-	const int oid_size;
+	const unsigned int oid_size;
 } gostr3410_hash_param_oid [] = {
 	{ &gostr3411_94_cryptopro_paramset_encoded_oid[0],
 		sizeof(gostr3411_94_cryptopro_paramset_encoded_oid),
