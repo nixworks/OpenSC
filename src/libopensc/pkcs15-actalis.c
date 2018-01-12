@@ -22,7 +22,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +37,7 @@
 #include "libopensc/pkcs15.h"
 #include "libopensc/log.h"
 
-int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static int (*set_security_env) (sc_card_t *, const sc_security_env_t *, int);
 
@@ -93,6 +95,7 @@ static int sc_pkcs15emu_add_pin(sc_pkcs15_card_t *p15card,
         info.attrs.pin.flags             = flags;
         info.attrs.pin.pad_char          = pad_char;
         info.tries_left        = tries_left;
+	info.logged_in = SC_PIN_STATE_UNKNOWN;
 
         if (path)
                 info.path = *path;
@@ -122,10 +125,6 @@ static int sc_pkcs15emu_add_prkey(sc_pkcs15_card_t *p15card,
         info.modulus_length    = modulus_length;
         info.usage             = usage;
         info.native            = 1;
-        info.access_flags      = SC_PKCS15_PRKEY_ACCESS_SENSITIVE
-                                | SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
-                                | SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE
-                                | SC_PKCS15_PRKEY_ACCESS_LOCAL;
         info.key_reference     = ref;
 
         if (path)
@@ -226,6 +225,11 @@ static int sc_pkcs15emu_actalis_init(sc_pkcs15_card_t * p15card)
 			compCert = malloc(compLen * sizeof(unsigned char));
 			len = 3 * compLen;	/*Approximation of the uncompressed size */
 			cert = malloc(len * sizeof(unsigned char));
+			if (!cert || !compCert) {
+				free(cert);
+				free(compCert);
+				return SC_ERROR_OUT_OF_MEMORY;
+			}
 
 			sc_read_binary(card, 4, compCert, compLen, 0);
 
@@ -308,7 +312,8 @@ static int actalis_detect_card(sc_pkcs15_card_t * p15card)
 }
 
 int sc_pkcs15emu_actalis_init_ex(sc_pkcs15_card_t * p15card,
-				   sc_pkcs15emu_opt_t * opts)
+				 struct sc_aid *aid,
+				 sc_pkcs15emu_opt_t * opts)
 {
 	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)
 		return sc_pkcs15emu_actalis_init(p15card);

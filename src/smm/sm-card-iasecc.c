@@ -22,6 +22,7 @@
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -66,7 +67,9 @@ sm_iasecc_get_apdu_read_binary(struct sc_context *ctx, struct sm_info *sm_info, 
         if (!rdata || !rdata->alloc)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "SM get 'READ BINARY' APDUs: offset:%i,size:%i", cmd_data->offs, cmd_data->count);
+	sc_log(ctx,
+	       "SM get 'READ BINARY' APDUs: offset:%"SC_FORMAT_LEN_SIZE_T"u,size:%"SC_FORMAT_LEN_SIZE_T"u",
+	       cmd_data->offs, cmd_data->count);
 	offs = cmd_data->offs;
 	while (cmd_data->count > data_offs)   {
 		int sz = (cmd_data->count - data_offs) > SM_MAX_DATA_SIZE ? SM_MAX_DATA_SIZE : (cmd_data->count - data_offs);
@@ -110,7 +113,9 @@ sm_iasecc_get_apdu_update_binary(struct sc_context *ctx, struct sm_info *sm_info
         if (!rdata || !rdata->alloc)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "SM get 'UPDATE BINARY' APDUs: offset:%i,size:%i", cmd_data->offs, cmd_data->count);
+	sc_log(ctx,
+	       "SM get 'UPDATE BINARY' APDUs: offset:%"SC_FORMAT_LEN_SIZE_T"u,size:%"SC_FORMAT_LEN_SIZE_T"u",
+	       cmd_data->offs, cmd_data->count);
 	offs = cmd_data->offs;
 	while (data_offs < cmd_data->count)   {
 		int sz = (cmd_data->count - data_offs) > SM_MAX_DATA_SIZE ? SM_MAX_DATA_SIZE : (cmd_data->count - data_offs);
@@ -152,13 +157,13 @@ sm_iasecc_get_apdu_create_file(struct sc_context *ctx, struct sm_info *sm_info, 
 	int rv = 0;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "SM get 'CREATE FILE' APDU: FCP(%i) %s", cmd_data->size, sc_dump_hex(cmd_data->data,cmd_data->size));
 
-	if (!cmd_data || !cmd_data->data)
+	if (!cmd_data || !cmd_data->data || !rdata || !rdata->alloc)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-        if (!rdata || !rdata->alloc)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
+	sc_log(ctx,
+	       "SM get 'CREATE FILE' APDU: FCP(%"SC_FORMAT_LEN_SIZE_T"u) %s",
+	       cmd_data->size, sc_dump_hex(cmd_data->data,cmd_data->size));
 
  	rv = rdata->alloc(rdata, &rapdu);
 	LOG_TEST_RET(ctx, rv, "SM get 'UPDATE BINARY' APDUs: cannot allocate remote APDU");
@@ -187,7 +192,7 @@ sm_iasecc_get_apdu_create_file(struct sc_context *ctx, struct sm_info *sm_info, 
 static int
 sm_iasecc_get_apdu_delete_file(struct sc_context *ctx, struct sm_info *sm_info, struct sc_remote_data *rdata)
 {
-	unsigned int file_id = (unsigned int)sm_info->cmd_data;
+	unsigned int file_id = (unsigned int)(uintptr_t)sm_info->cmd_data;
 	struct sc_remote_apdu *rapdu = NULL;
 	int rv;
 
@@ -197,7 +202,7 @@ sm_iasecc_get_apdu_delete_file(struct sc_context *ctx, struct sm_info *sm_info, 
 	if (!file_id)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-        if (!rdata || !rdata->alloc)
+	if (!rdata || !rdata->alloc)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
  	rv = rdata->alloc(rdata, &rapdu);
@@ -229,15 +234,12 @@ sm_iasecc_get_apdu_verify_pin(struct sc_context *ctx, struct sm_info *sm_info, s
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "SM get 'VERIFY PIN' APDU: ", pin_data->pin_reference);
-
-	if (!pin_data)
+	if (!pin_data || !rdata || !rdata->alloc)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-        if (!rdata || !rdata->alloc)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
+	sc_log(ctx, "SM get 'VERIFY PIN' APDU: %u", pin_data->pin_reference);
 
- 	rv = rdata->alloc(rdata, &rapdu);
+	rv = rdata->alloc(rdata, &rapdu);
 	LOG_TEST_RET(ctx, rv, "SM get 'VERIFY PIN' APDUs: cannot allocate remote APDU");
 
 	rapdu->apdu.cse = SC_APDU_CASE_3_SHORT;
@@ -272,13 +274,11 @@ sm_iasecc_get_apdu_reset_pin(struct sc_context *ctx, struct sm_info *sm_info, st
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
+
+	if (!pin_data || !rdata || !rdata->alloc)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
+
 	sc_log(ctx, "SM get 'RESET PIN' APDU; reference %i", pin_data->pin_reference);
-
-	if (!pin_data)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-
-        if (!rdata || !rdata->alloc)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
  	rv = rdata->alloc(rdata, &rapdu);
 	LOG_TEST_RET(ctx, rv, "SM get 'RESET PIN' APDUs: cannot allocate remote APDU");
@@ -499,100 +499,6 @@ sm_iasecc_get_apdu_update_rsa(struct sc_context *ctx, struct sm_info *sm_info, s
 }
 
 
-#if 0
-static int
-sm_iasecc_get_apdu_pso_dst(struct sc_context *ctx, struct sm_info *sm_info, struct sc_remote_apdu **rapdus)
-{
-	struct sm_info_iasecc_pso_dst *ipd = &sm_info->cmd_params.iasecc_pso_dst;
-	struct sc_remote_apdu *rapdu = NULL;
-	int rv;
-
-	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "SM get 'PSO DST' APDU");
-
-	if (ipd->pso_data_len > SM_MAX_DATA_SIZE)
-		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
-
-	rv = sc_remote_apdu_allocate(rapdus, &rapdu);
-	LOG_TEST_RET(ctx, rv, "SM get 'PSO HASH' APDU: cannot allocate remote apdu");
-
-	rapdu->apdu.cse = SC_APDU_CASE_3_SHORT;
-	rapdu->apdu.cla = 0x00;
-	rapdu->apdu.ins = 0x2A;
-	rapdu->apdu.p1 = 0x90;
-	rapdu->apdu.p2 = 0xA0;
-	memcpy((unsigned char *)rapdu->apdu.data, ipd->pso_data, ipd->pso_data_len);
-	rapdu->apdu.datalen = ipd->pso_data_len;
-	rapdu->apdu.lc = ipd->pso_data_len;
-
-	rv = sm_iasecc_securize_apdu(ctx, sm_info, rapdu);
-	LOG_TEST_RET(ctx, rv, "SM get 'PSO HASH' APDU: securize error");
-
-	rapdu->get_response = 1;
-
-	rv = sc_remote_apdu_allocate(rapdus, &rapdu);
-	LOG_TEST_RET(ctx, rv, "SM get 'PSO DST' APDU: cannot allocate remote apdu");
-
-	rapdu->apdu.cse = SC_APDU_CASE_2_SHORT;
-	rapdu->apdu.cla = 0x00;
-	rapdu->apdu.ins = 0x2A;
-	rapdu->apdu.p1 = 0x9E;
-	rapdu->apdu.p2 = 0x9A;
-	rapdu->apdu.le = ipd->key_size;
-
-	rv = sm_iasecc_securize_apdu(ctx, sm_info, rapdu);
-	LOG_TEST_RET(ctx, rv, "SM get 'PSO DST' APDU: securize error");
-
-	rapdu->get_response = 1;
-
-
-	LOG_FUNC_RETURN(ctx, rv);
-}
-#endif
-
-
-#if 0
-static int
-sm_iasecc_get_apdu_raw_apdu(struct sc_context *ctx, struct sm_info *sm_info, struct sc_remote_apdu **rapdus)
-{
-	struct sc_apdu *apdu = sm_info->cmd_params.raw_apdu.apdu;
-	size_t data_offs, data_len = apdu->datalen;
-	int rv = SC_ERROR_INVALID_ARGUMENTS;
-
-	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "SM get 'RAW APDU' APDU");
-
-	data_offs = 0;
-	data_len = apdu->datalen;
-	for (; data_len; )   {
-		int sz = data_len > SM_MAX_DATA_SIZE ? SM_MAX_DATA_SIZE : data_len;
-		struct sc_remote_apdu *rapdu = NULL;
-
-		rv = sc_remote_apdu_allocate(rapdus, &rapdu);
-		LOG_TEST_RET(ctx, rv, "SM get 'RAW APDU' APDUs: cannot allocate remote apdu");
-
-		rapdu->apdu.cse = apdu->cse;
-		rapdu->apdu.cla = apdu->cla | ((data_offs + sz) < data_len ? 0x10 : 0x00);
-		rapdu->apdu.ins = apdu->ins;
-		rapdu->apdu.p1 = apdu->p1;
-		rapdu->apdu.p2 = apdu->p2;
-		memcpy((unsigned char *)rapdu->apdu.data, apdu->data + data_offs, sz);
-		rapdu->apdu.datalen = sz;
-		rapdu->apdu.lc = sz;
-
-		rv = sm_iasecc_securize_apdu(ctx, sm_info, rapdu);
-		LOG_TEST_RET(ctx, rv, "SM get 'UPDATE BINARY' APDUs: securize error");
-
-		rapdu->get_response = 1;
-
-		data_offs += sz;
-		data_len -= sz;
-	}
-
-	LOG_FUNC_RETURN(ctx, rv);
-}
-#endif
-
 int
 sm_iasecc_get_apdus(struct sc_context *ctx, struct sm_info *sm_info,
 	       unsigned char *init_data, size_t init_len, struct sc_remote_data *rdata, int release_sm)
@@ -605,7 +511,8 @@ sm_iasecc_get_apdus(struct sc_context *ctx, struct sm_info *sm_info,
 	if (!sm_info)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "SM IAS/ECC get APDUs: init_len:%i", init_len);
+	sc_log(ctx, "SM IAS/ECC get APDUs: init_len:%"SC_FORMAT_LEN_SIZE_T"u",
+	       init_len);
 	sc_log(ctx, "SM IAS/ECC get APDUs: rdata:%p", rdata);
 	sc_log(ctx, "SM IAS/ECC get APDUs: serial %s", sc_dump_hex(sm_info->serialnr.value, sm_info->serialnr.len));
 
@@ -652,16 +559,6 @@ sm_iasecc_get_apdus(struct sc_context *ctx, struct sm_info *sm_info,
 		rv = sm_iasecc_get_apdu_sdo_update(ctx, sm_info, rdata);
 		LOG_TEST_RET(ctx, rv, "SM IAS/ECC get APDUs: 'SDO UPDATE' failed");
 		break;
-#if 0
-	case SM_CMD_PSO_DST:
-		rv = sm_iasecc_get_apdu_pso_dst(ctx, sm_info, &rapdus);
-		LOG_TEST_RET(ctx, rv, "SM IAS/ECC get APDUs: 'PSO DST' failed");
-		break;
-	case SM_CMD_APDU_RAW:
-		rv = sm_iasecc_get_apdu_raw_apdu(ctx, sm_info, &rapdus);
-		LOG_TEST_RET(ctx, rv, "SM IAS/ECC get APDUs: 'RAW APDU' failed");
-		break;
-#endif
 	case SM_CMD_PIN_VERIFY:
 		rv = sm_iasecc_get_apdu_verify_pin(ctx, sm_info, rdata);
 		LOG_TEST_RET(ctx, rv, "SM IAS/ECC get APDUs: 'RAW APDU' failed");
@@ -689,7 +586,9 @@ sm_iasecc_decode_card_data(struct sc_context *ctx, struct sm_info *sm_info, stru
 
 	LOG_FUNC_CALLED(ctx);
 
-	sc_log(ctx, "IAS/ECC decode answer() rdata length %i, out length %i", rdata->length, out_len);
+	sc_log(ctx,
+	       "IAS/ECC decode answer() rdata length %i, out length %"SC_FORMAT_LEN_SIZE_T"u",
+	       rdata->length, out_len);
         for (rapdu = rdata->data; rapdu; rapdu = rapdu->next)   {
                 unsigned char *decrypted;
                 size_t decrypted_len;
@@ -700,7 +599,9 @@ sm_iasecc_decode_card_data(struct sc_context *ctx, struct sm_info *sm_info, stru
 		unsigned char ticket[8];
 		size_t ticket_len = sizeof(ticket);
 
-		sc_log(ctx, "IAS/ECC decode response(%i) %s", rapdu->apdu.resplen, sc_dump_hex(rapdu->apdu.resp, rapdu->apdu.resplen));
+		sc_log(ctx,
+		       "IAS/ECC decode response(%"SC_FORMAT_LEN_SIZE_T"u) %s",
+		       rapdu->apdu.resplen, sc_dump_hex(rapdu->apdu.resp, rapdu->apdu.resplen));
 
 		sc_copy_asn1_entry(c_asn1_iasecc_sm_data_object, asn1_iasecc_sm_data_object);
 		sc_format_asn1_entry(asn1_iasecc_sm_data_object + 0, resp_data, &resp_len, 0);
@@ -724,7 +625,10 @@ sm_iasecc_decode_card_data(struct sc_context *ctx, struct sm_info *sm_info, stru
 					&decrypted, &decrypted_len);
 			LOG_TEST_RET(ctx, rv, "IAS/ECC decode answer(s): cannot decrypt card answer data");
 
-			sc_log(ctx, "IAS/ECC decrypted data(%i) %s", decrypted_len, sc_dump_hex(decrypted, decrypted_len));
+			sc_log(ctx,
+			       "IAS/ECC decrypted data(%"SC_FORMAT_LEN_SIZE_T"u) %s",
+			       decrypted_len,
+			       sc_dump_hex(decrypted, decrypted_len));
 			while(*(decrypted + decrypted_len - 1) == 0x00)
 			       decrypted_len--;
 			if (*(decrypted + decrypted_len - 1) != 0x80)
@@ -738,7 +642,9 @@ sm_iasecc_decode_card_data(struct sc_context *ctx, struct sm_info *sm_info, stru
 				memcpy(out + offs, decrypted, decrypted_len);
 
 				offs += decrypted_len;
-				sc_log(ctx, "IAS/ECC decode card answer(s): out_len/offs %i/%i", out_len, offs);
+				sc_log(ctx,
+				       "IAS/ECC decode card answer(s): out_len/offs %"SC_FORMAT_LEN_SIZE_T"u/%i",
+				       out_len, offs);
 			}
 
 			free(decrypted);

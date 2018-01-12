@@ -21,7 +21,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <ctype.h>
 #include <string.h>
@@ -355,6 +357,7 @@ static int incrypto34_create_file(sc_card_t *card, sc_file_t *file)
 				 * generation. */
 			case SC_FILE_EF_LINEAR_VARIABLE_TLV:
 				type[1] = 0xff;
+				/* fall through */
 			default:
 				type[0] |= file->ef_structure & 7;
 				break;
@@ -551,7 +554,7 @@ incrypto34_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
 	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
 		"trying RSA_SIG (just the DigestInfo)\n");
 	/* remove padding: first try pkcs1 bt01 padding */
-	r = sc_pkcs1_strip_01_padding(data, datalen, buf, &tmp_len);
+	r = sc_pkcs1_strip_01_padding(ctx, data, datalen, buf, &tmp_len);
 	if (r != SC_SUCCESS) {
 		const u8 *p = data;
 		/* no pkcs1 bt01 padding => let's try zero padding.
@@ -722,7 +725,7 @@ incrypto34_generate_key(sc_card_t *card,
 	apdu.ins = 0x46;
 	apdu.p1  = 0x00;
 	apdu.p2  = args->key_id;/* doc is not clear, it just says "ID" */
-	apdu.p2  = 0x00;
+	apdu.le  = 0x00;
 	apdu.data= data;
 	apdu.datalen = apdu.lc = sizeof(data);
 

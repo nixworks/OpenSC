@@ -15,8 +15,11 @@ libcompat_la_SOURCES = \
 	compat_dummy.c \
 	compat_strlcat.h compat_strlcat.c \
 	compat_strlcpy.h compat_strlcpy.c \
+	compat_strnlen.h compat_strnlen.c \
 	compat_getpass.h compat_getpass.c \
 	compat_getopt.h compat_getopt.c \
+	compat_report_rangecheckfailure.c \
+	compat___iob_func.c \
 	simclist.c simclist.h
 
 compat_getopt_main_LDADD = libcompat.la

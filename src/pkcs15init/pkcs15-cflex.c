@@ -114,8 +114,7 @@ static int cflex_erase_card(struct sc_profile *profile, sc_pkcs15_card_t *p15car
 
 
 out:	/* Forget all cached keys, the pin files on card are all gone. */
-	if (userpinfile)
-		sc_file_free(userpinfile);
+	sc_file_free(userpinfile);
 
         sc_free_apps(p15card->card);
         if (r == SC_ERROR_FILE_NOT_FOUND)
@@ -224,7 +223,7 @@ cflex_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *df
 	struct sc_pkcs15_pin_attributes *pin_attrs = &auth_info->attrs.pin;
 	sc_file_t	*dummies[2];
 	int		ndummies, pin_type, puk_type, r;
-	sc_file_t       *file;
+	sc_file_t       *file = NULL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 
@@ -250,6 +249,7 @@ cflex_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *df
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_FILE_NOT_FOUND, "profile does not define pin file ACLs");
 
 	ndummies = cflex_create_dummy_chvs(profile, p15card, file, SC_AC_OP_CREATE, dummies);
+	sc_file_free(file);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, ndummies, "Unable to create dummy CHV file");
 
 	r = cflex_create_pin_file(profile, p15card, &df->path, pin_attrs->reference,
@@ -289,15 +289,16 @@ cflex_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_pkcs15_obj
 	case 1024: size = 326; break;
 	case 2048: size = 646; break;
 	default:
-		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported key size %u\n",
-				key_info->modulus_length);
+		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
+			 "Unsupported key size %"SC_FORMAT_LEN_SIZE_T"u\n",
+			 key_info->modulus_length);
 		r = SC_ERROR_INVALID_ARGUMENTS;
 		goto out;
 	}
 
-	if (prkf->size < size)
+	if (prkf && prkf->size < size)
 		prkf->size = size;
-	if (pukf->size < size + 4)
+	if (pukf && pukf->size < size + 4)
 		pukf->size = size + 4;
 
 	/* Now create the files */
@@ -307,10 +308,8 @@ cflex_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_pkcs15_obj
 
 	key_info->key_reference = 0;
 
-out:	if (prkf)
-		sc_file_free(prkf);
-	if (pukf)
-		sc_file_free(pukf);
+out:	sc_file_free(prkf);
+	sc_file_free(pukf);
 	return r;
 }
 
@@ -371,10 +370,8 @@ cflex_generate_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 
 	invert_buf(pubkey->u.rsa.modulus.data, raw_pubkey, pubkey->u.rsa.modulus.len);
 
-out:	if (pukf)
-		sc_file_free(pukf);
-	if (prkf)
-		sc_file_free(prkf);
+out:	sc_file_free(pukf);
+	sc_file_free(prkf);
 	return r;
 }
 
@@ -388,7 +385,7 @@ cflex_store_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 {
 	sc_pkcs15_prkey_info_t *key_info = (sc_pkcs15_prkey_info_t *) obj->data;
 	sc_card_t *card = p15card->card;
-	sc_file_t	*prkf, *pukf;
+	sc_file_t	*prkf = NULL, *pukf = NULL;
 	unsigned char	keybuf[1024];
 	size_t		size;
 	int		r;

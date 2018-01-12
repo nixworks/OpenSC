@@ -26,7 +26,20 @@
 #include <sys/time.h>
 #endif
 
+#ifdef PKCS11_THREAD_LOCKING
+#if defined(HAVE_PTHREAD)
+#include <pthread.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
+#endif /* PKCS11_THREAD_LOCKING */
+
 #include "sc-pkcs11.h"
+#include "ui/notify.h"
+
+#ifndef MODULE_APP_NAME
+#define MODULE_APP_NAME "opensc-pkcs11"
+#endif
 
 sc_context_t *context = NULL;
 struct sc_pkcs11_config sc_pkcs11_conf;
@@ -38,11 +51,15 @@ pid_t initialized_pid = (pid_t)-1;
 static int in_finalize = 0;
 extern CK_FUNCTION_LIST pkcs11_function_list;
 
-#if defined(HAVE_PTHREAD) && defined(PKCS11_THREAD_LOCKING)
-#include <pthread.h>
+#ifdef PKCS11_THREAD_LOCKING
+
+#if defined(HAVE_PTHREAD)
+
 CK_RV mutex_create(void **mutex)
 {
-	pthread_mutex_t *m = malloc(sizeof(*mutex));
+	pthread_mutex_t *m;
+
+	m = calloc(1, sizeof(*m));
 	if (m == NULL)
 		return CKR_GENERAL_ERROR;;
 	pthread_mutex_init(m, NULL);
@@ -75,12 +92,15 @@ CK_RV mutex_destroy(void *p)
 
 static CK_C_INITIALIZE_ARGS _def_locks = {
 	mutex_create, mutex_destroy, mutex_lock, mutex_unlock, 0, NULL };
-#elif defined(_WIN32) && defined (PKCS11_THREAD_LOCKING)
+#define HAVE_OS_LOCKING
+
+#elif defined(_WIN32)
+
 CK_RV mutex_create(void **mutex)
 {
 	CRITICAL_SECTION *m;
 
-	m = malloc(sizeof(*m));
+	m = calloc(1, sizeof(*m));
 	if (m == NULL)
 		return CKR_GENERAL_ERROR;
 	InitializeCriticalSection(m);
@@ -108,14 +128,18 @@ CK_RV mutex_destroy(void *p)
 	free(p);
 	return CKR_OK;
 }
+
 static CK_C_INITIALIZE_ARGS _def_locks = {
 	mutex_create, mutex_destroy, mutex_lock, mutex_unlock, 0, NULL };
+#define HAVE_OS_LOCKING
+
 #endif
 
+#endif /* PKCS11_THREAD_LOCKING */
+
 static CK_C_INITIALIZE_ARGS_PTR	global_locking;
-static void *			global_lock = NULL;
-#if (defined(HAVE_PTHREAD) || defined(_WIN32)) && defined(PKCS11_THREAD_LOCKING)
-#define HAVE_OS_LOCKING
+static void *global_lock = NULL;
+#ifdef HAVE_OS_LOCKING
 static CK_C_INITIALIZE_ARGS_PTR default_mutex_funcs = &_def_locks;
 #else
 static CK_C_INITIALIZE_ARGS_PTR default_mutex_funcs = NULL;
@@ -198,9 +222,11 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 	unsigned int i;
 	sc_context_param_t ctx_opts;
 
-	/* Handle fork() exception */
 #if !defined(_WIN32)
+	/* Handle fork() exception */
 	if (current_pid != initialized_pid) {
+		if (context)
+			context->flags |= SC_CTX_FLAG_TERMINATE;
 		C_Finalize(NULL_PTR);
 	}
 	initialized_pid = current_pid;
@@ -212,6 +238,8 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 		return CKR_CRYPTOKI_ALREADY_INITIALIZED;
 	}
 
+	sc_notify_init();
+
 	rv = sc_pkcs11_init_lock((CK_C_INITIALIZE_ARGS_PTR) pInitArgs);
 	if (rv != CKR_OK)
 		goto out;
@@ -219,7 +247,7 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 	/* set context options */
 	memset(&ctx_opts, 0, sizeof(sc_context_param_t));
 	ctx_opts.ver        = 0;
-	ctx_opts.app_name   = "opensc-pkcs11";
+	ctx_opts.app_name   = MODULE_APP_NAME;
 	ctx_opts.thread_ctx = &sc_thread_ctx;
 
 	rc = sc_context_create(&context, &ctx_opts);
@@ -232,27 +260,22 @@ CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 	load_pkcs11_parameters(&sc_pkcs11_conf, context);
 
 	/* List of sessions */
-	list_init(&sessions);
+	if (0 != list_init(&sessions)) {
+		rv = CKR_HOST_MEMORY;
+		goto out;
+	}
 	list_attributes_seeker(&sessions, session_list_seeker);
 
 	/* List of slots */
-	list_init(&virtual_slots);
+	if (0 != list_init(&virtual_slots)) {
+		rv = CKR_HOST_MEMORY;
+		goto out;
+	}
 	list_attributes_seeker(&virtual_slots, slot_list_seeker);
 
-	/* Create a slot for a future "PnP" stuff. */
-	if (sc_pkcs11_conf.plug_and_play) {
-		create_slot(NULL);
-	}
-	/* Create slots for readers found on initialization */
-	for (i=0; i<sc_ctx_get_reader_count(context); i++) {
-		initialize_reader(sc_ctx_get_reader(context, i));
-	}
-
-	/* Set initial event state on slots */
-	for (i=0; i<list_size(&virtual_slots); i++) {
-		sc_pkcs11_slot_t *slot = (sc_pkcs11_slot_t *) list_get_at(&virtual_slots, i);
-		slot->events = 0; /* Initially there are no events */
-	}
+	/* Create slots for readers found on initialization, only if in 2.11 mode */
+	for (i=0; i<sc_ctx_get_reader_count(context); i++)
+			initialize_reader(sc_ctx_get_reader(context, i));
 
 out:
 	if (context != NULL)
@@ -280,6 +303,8 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved)
 	if (pReserved != NULL_PTR)
 		return CKR_ARGUMENTS_BAD;
 
+	sc_notify_close();
+
 	if (context == NULL)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
@@ -302,6 +327,7 @@ CK_RV C_Finalize(CK_VOID_PTR pReserved)
 
 	while ((slot = list_fetch(&virtual_slots))) {
 		list_destroy(&slot->objects);
+		list_destroy(&slot->logins);
 		free(slot);
 	}
 	list_destroy(&virtual_slots);
@@ -332,13 +358,13 @@ CK_RV C_GetInfo(CK_INFO_PTR pInfo)
 	pInfo->cryptokiVersion.major = 2;
 	pInfo->cryptokiVersion.minor = 20;
 	strcpy_bp(pInfo->manufacturerID,
-		  "OpenSC (www.opensc-project.org)",
+		  OPENSC_VS_FF_COMPANY_NAME,
 		  sizeof(pInfo->manufacturerID));
 	strcpy_bp(pInfo->libraryDescription,
-		  "Smart card PKCS#11 API",
+		  OPENSC_VS_FF_PRODUCT_NAME,
 		  sizeof(pInfo->libraryDescription));
-	pInfo->libraryVersion.major = 0;
-	pInfo->libraryVersion.minor = 0; /* FIXME: use 0.116 for 0.11.6 from autoconf */
+	pInfo->libraryVersion.major = OPENSC_VERSION_MAJOR;
+	pInfo->libraryVersion.minor = OPENSC_VERSION_MINOR;
 
 	sc_pkcs11_unlock();
 	return rv;
@@ -367,24 +393,20 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
 	if (pulCount == NULL_PTR)
 		return CKR_ARGUMENTS_BAD;
 
-	if ((rv = sc_pkcs11_lock()) != CKR_OK) {
+	rv = sc_pkcs11_lock();
+	if (rv != CKR_OK)
 		return rv;
-	}
 
 	sc_log(context, "C_GetSlotList(token=%d, %s)", tokenPresent,
-		 (pSlotList==NULL_PTR && sc_pkcs11_conf.plug_and_play)? "plug-n-play":"refresh");
+			pSlotList==NULL_PTR? "plug-n-play":"refresh");
 
 	/* Slot list can only change in v2.20 */
-	if (pSlotList == NULL_PTR && sc_pkcs11_conf.plug_and_play) {
-		/* Trick NSS into updating the slot list by changing the hotplug slot ID */
-		sc_pkcs11_slot_t *hotplug_slot = list_get_at(&virtual_slots, 0);
-		hotplug_slot->id--;
+	if (pSlotList == NULL_PTR)
 		sc_ctx_detect_readers(context);
-	}
 
 	card_detect_all();
 
-	found = malloc(list_size(&virtual_slots) * sizeof(CK_SLOT_ID));
+	found = calloc(list_size(&virtual_slots), sizeof(CK_SLOT_ID));
 
 	if (found == NULL) {
 		rv = CKR_HOST_MEMORY;
@@ -394,28 +416,32 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
 	prev_reader = NULL;
 	numMatches = 0;
 	for (i=0; i<list_size(&virtual_slots); i++) {
-	        slot = (sc_pkcs11_slot_t *) list_get_at(&virtual_slots, i);
+		slot = (sc_pkcs11_slot_t *) list_get_at(&virtual_slots, i);
 		/* the list of available slots contains:
 		 * - if present, virtual hotplug slot;
 		 * - any slot with token;
 		 * - without token(s), one empty slot per reader;
+		 * - any slot that has already been seen;
 		 */
-	        if ((!tokenPresent && !slot->reader)
+		if ((!tokenPresent && !slot->reader)
 				|| (!tokenPresent && slot->reader != prev_reader)
-				|| (slot->slot_info.flags & CKF_TOKEN_PRESENT))
+				|| (slot->slot_info.flags & CKF_TOKEN_PRESENT)
+				|| (slot->flags & SC_PKCS11_SLOT_FLAG_SEEN)) {
 			found[numMatches++] = slot->id;
+			slot->flags |= SC_PKCS11_SLOT_FLAG_SEEN;
+		}
 		prev_reader = slot->reader;
 	}
 
 	if (pSlotList == NULL_PTR) {
-		sc_log(context, "was only a size inquiry (%d)\n", numMatches);
+		sc_log(context, "was only a size inquiry (%lu)\n", numMatches);
 		*pulCount = numMatches;
 		rv = CKR_OK;
 		goto out;
 	}
 
 	if (*pulCount < numMatches) {
-		sc_log(context, "buffer was too small (needed %d)\n", numMatches);
+		sc_log(context, "buffer was too small (needed %lu)\n", numMatches);
 		*pulCount = numMatches;
 		rv = CKR_BUFFER_TOO_SMALL;
 		goto out;
@@ -425,7 +451,7 @@ CK_RV C_GetSlotList(CK_BBOOL       tokenPresent,  /* only slots with token prese
 	*pulCount = numMatches;
 	rv = CKR_OK;
 
-	sc_log(context, "returned %d slots\n", numMatches);
+	sc_log(context, "returned %lu slots\n", numMatches);
 
 out:
 	if (found != NULL) {
@@ -478,27 +504,45 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pInfo)
 
 	sc_log(context, "C_GetSlotInfo(0x%lx)", slotID);
 
+	if (sc_pkcs11_conf.init_sloppy) {
+		/* Most likely virtual_slots only contains the hotplug slot and has not
+		 * been initialized because the caller has *not* called C_GetSlotList
+		 * before C_GetSlotInfo, as required by PKCS#11.  Initialize
+		 * virtual_slots to make things work and hope the caller knows what
+		 * it's doing... */
+		card_detect_all();
+	}
+
 	rv = slot_get_slot(slotID, &slot);
-	if (rv == CKR_OK){
-		if (slot->reader == NULL)
+	sc_log(context, "C_GetSlotInfo() get slot rv %lu", rv);
+	if (rv == CKR_OK)   {
+		if (slot->reader == NULL)   {
 			rv = CKR_TOKEN_NOT_PRESENT;
+		}
 		else {
 			now = get_current_time();
 			if (now >= slot->slot_state_expires || now == 0) {
 				/* Update slot status */
 				rv = card_detect(slot->reader);
+				sc_log(context, "C_GetSlotInfo() card detect rv 0x%lX", rv);
+
+				if (rv == CKR_TOKEN_NOT_RECOGNIZED || rv == CKR_OK)
+					slot->slot_info.flags |= CKF_TOKEN_PRESENT;
+
 				/* Don't ask again within the next second */
 				slot->slot_state_expires = now + 1000;
 			}
 		}
 	}
+
 	if (rv == CKR_TOKEN_NOT_PRESENT || rv == CKR_TOKEN_NOT_RECOGNIZED)
 		rv = CKR_OK;
 
 	if (rv == CKR_OK)
 		memcpy(pInfo, &slot->slot_info, sizeof(CK_SLOT_INFO));
 
-	sc_log(context, "C_GetSlotInfo(0x%lx) = %s", slotID, lookup_enum ( RV_T, rv ));
+	sc_log(context, "C_GetSlotInfo() flags 0x%lX", pInfo->flags);
+	sc_log(context, "C_GetSlotInfo(0x%lx) = %s", slotID, lookup_enum( RV_T, rv));
 	sc_pkcs11_unlock();
 	return rv;
 }
@@ -519,7 +563,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slotID,
 
 	rv = slot_get_token(slotID, &slot);
 	if (rv == CKR_OK)
-		rv = sc_pkcs11_get_mechanism_list(slot->card, pMechanismList, pulCount);
+		rv = sc_pkcs11_get_mechanism_list(slot->p11card, pMechanismList, pulCount);
 
 	sc_pkcs11_unlock();
 	return rv;
@@ -541,7 +585,7 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID,
 
 	rv = slot_get_token(slotID, &slot);
 	if (rv == CKR_OK)
-		rv = sc_pkcs11_get_mechanism_info(slot->card, type, pInfo);
+		rv = sc_pkcs11_get_mechanism_info(slot->p11card, type, pInfo);
 
 	sc_pkcs11_unlock();
 	return rv;
@@ -557,13 +601,23 @@ CK_RV C_InitToken(CK_SLOT_ID slotID,
 	CK_RV rv;
 	unsigned int i;
 
+	sc_log(context, "C_InitToken(pLabel='%s') called", pLabel);
 	rv = sc_pkcs11_lock();
 	if (rv != CKR_OK)
 		return rv;
 
 	rv = slot_get_token(slotID, &slot);
-	if (rv != CKR_OK)
+	if (rv != CKR_OK)   {
+		sc_log(context, "C_InitToken() get token error 0x%lX", rv);
 		goto out;
+	}
+
+	if (!slot->p11card || !slot->p11card->framework
+		   || !slot->p11card->framework->init_token) {
+		sc_log(context, "C_InitToken() not supported by framework");
+		rv = CKR_FUNCTION_NOT_SUPPORTED;
+		goto out;
+	}
 
 	/* Make sure there's no open session for this token */
 	for (i=0; i<list_size(&sessions); i++) {
@@ -574,19 +628,15 @@ CK_RV C_InitToken(CK_SLOT_ID slotID,
 		}
 	}
 
-	if (slot->card->framework->init_token == NULL) {
-		rv = CKR_FUNCTION_NOT_SUPPORTED;
-		goto out;
-	}
-	rv = slot->card->framework->init_token(slot->card,
-				 slot->fw_data, pPin, ulPinLen, pLabel);
-
+	rv = slot->p11card->framework->init_token(slot, slot->fw_data, pPin, ulPinLen, pLabel);
 	if (rv == CKR_OK) {
 		/* Now we should re-bind all tokens so they get the
 		 * corresponding function vector and flags */
 	}
 
-out:	sc_pkcs11_unlock();
+out:
+	sc_pkcs11_unlock();
+	sc_log(context, "C_InitToken(pLabel='%s') returns 0x%lX", pLabel, rv);
 	return rv;
 }
 
@@ -605,20 +655,17 @@ CK_RV C_WaitForSlotEvent(CK_FLAGS flags,   /* blocking/nonblocking flag */
 		return  CKR_ARGUMENTS_BAD;
 
 	sc_log(context, "C_WaitForSlotEvent(block=%d)", !(flags & CKF_DONT_BLOCK));
+#ifndef PCSCLITE_GOOD
 	/* Not all pcsc-lite versions implement consistently used functions as they are */
-	/* FIXME: add proper checking into build to check correct pcsc-lite version for SCardStatusChange/SCardCancel */
 	if (!(flags & CKF_DONT_BLOCK))
 		return CKR_FUNCTION_NOT_SUPPORTED;
+#endif /* PCSCLITE_GOOD */
 	rv = sc_pkcs11_lock();
 	if (rv != CKR_OK)
 		return rv;
 
-	mask = SC_EVENT_CARD_EVENTS;
-
+	mask = SC_EVENT_CARD_EVENTS | SC_EVENT_READER_EVENTS;
 	/* Detect and add new slots for added readers v2.20 */
-	if (sc_pkcs11_conf.plug_and_play) {
-		mask |= SC_EVENT_READER_EVENTS;
-	}
 
 	rv = slot_find_changed(&slot_id, mask);
 	if ((rv == CKR_OK) || (flags & CKF_DONT_BLOCK))
@@ -628,12 +675,7 @@ again:
 	sc_log(context, "C_WaitForSlotEvent() reader_states:%p", reader_states);
 	sc_pkcs11_unlock();
 	r = sc_wait_for_event(context, mask, &found, &events, -1, &reader_states);
-	if (sc_pkcs11_conf.plug_and_play && events & SC_EVENT_READER_ATTACHED) {
-		/* NSS/Firefox Triggers a C_GetSlotList(NULL) only if a slot ID is returned that it does not know yet
-		   Change the first hotplug slot id on every call to make this happen. */
-		sc_pkcs11_slot_t *hotplug_slot = list_get_at(&virtual_slots, 0);
-		*pSlot= hotplug_slot->id -1;
-
+	if (events & SC_EVENT_READER_ATTACHED) {
 		rv = sc_pkcs11_lock();
 		if (rv != CKR_OK)
 			return rv;
@@ -669,7 +711,7 @@ out:
 		sc_wait_for_event(context, 0, NULL, NULL, -1, &reader_states);
 	}
 
-	sc_log(context, "C_WaitForSlotEvent() = %s, event in 0x%lx", lookup_enum (RV_T, rv), *pSlot);
+	sc_log(context, "C_WaitForSlotEvent() = %s", lookup_enum (RV_T, rv));
 	sc_pkcs11_unlock();
 	return rv;
 }

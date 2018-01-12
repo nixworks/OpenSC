@@ -24,7 +24,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +40,7 @@
 
 #define MANU_ID		"piv_II "
 
-int sc_pkcs15emu_piv_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_piv_init_ex(sc_pkcs15_card_t *, struct sc_aid *aid, sc_pkcs15emu_opt_t *);
 
 typedef struct objdata_st {
 	const char *id;
@@ -102,6 +104,11 @@ typedef struct common_key_info_st {
 	int pubkey_from_file;
 	int key_alg;
 	unsigned int pubkey_len;
+	unsigned int cert_keyUsage; /* x509 key usage as defined in certificate */
+	int cert_keyUsage_present; /* 1 if keyUsage found in certificate */
+	int pub_usage;
+	int priv_usage;
+	struct sc_pkcs15_pubkey *pubkey_from_cert;
 	int not_present;
 } common_key_info;
 
@@ -119,17 +126,17 @@ typedef struct common_key_info_st {
  */
 
 static int piv_get_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_object *obj,
-		char *out, size_t out_size)
+		unsigned char *out, size_t *out_size)
 {
 	struct sc_serial_number serialnr;
 	struct sc_pkcs15_id  id;
 	unsigned char guid_bin[SC_PKCS15_MAX_ID_SIZE + SC_MAX_SERIALNR];
-	size_t bin_size, offs, tlen;
-	int r, i;
+	size_t bin_size, offs, tlen, i;
+	int r;
 	unsigned char fbit, fbits, fbyte, fbyte2, fnibble;
 	unsigned char *f5p, *f8p;
 
-	if (!p15card || !obj || !out || out_size < 3)
+	if (!p15card || !obj || !out || *out_size < 3)
 		return SC_ERROR_INCORRECT_PARAMETERS;
 
 	r = sc_pkcs15_get_object_id(obj, &id);
@@ -141,7 +148,7 @@ static int piv_get_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_o
 		return r;
 
 	memset(guid_bin, 0, sizeof(guid_bin));
-	memset(out, 0, out_size);
+	memset(out, 0, *out_size);
 
 	if (id.len == 1 && serialnr.len == 25) {
 
@@ -211,14 +218,14 @@ static int piv_get_guid(struct sc_pkcs15_card *p15card, const struct sc_pkcs15_o
 	}
 
 	/* reserve one byte for the 'C' line ending */
-	bin_size = (out_size - 1)/2;
+	bin_size = (*out_size - 1)/2;
 	if (bin_size > tlen)
 		bin_size = tlen;
 
 	offs = tlen - bin_size;
 
 	for (i=0; i<bin_size; i++)
-		sprintf(out + i*2, "%02x", guid_bin[offs + i]);
+		sprintf((char *) out + i*2, "%02x", guid_bin[offs + i]);
 
 	return SC_SUCCESS;
 }
@@ -243,23 +250,23 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	/* Note: pkcs11 objects do not have CK_ID values */
 
 	static const objdata objects[] = {
-	{"1", "Card Capability Container", 
+	{"01", "Card Capability Container", 
 			"2.16.840.1.101.3.7.1.219.0", NULL, "DB00", 0},
-	{"2", "Card Holder Unique Identifier",
+	{"02", "Card Holder Unique Identifier",
 			"2.16.840.1.101.3.7.2.48.0", NULL, "3000", 0},
-	{"3", "Unsigned Card Holder Unique Identifier",
+	{"03", "Unsigned Card Holder Unique Identifier",
 			"2.16.840.1.101.3.7.2.48.2", NULL, "3010", 0},
-	{"4", "X.509 Certificate for PIV Authentication",
+	{"04", "X.509 Certificate for PIV Authentication",
 			"2.16.840.1.101.3.7.2.1.1", NULL, "0101", 0},
-	{"5", "Cardholder Fingerprints",
-			"2.16.840.1.101.3.7.2.96.16", "1", "6010", SC_PKCS15_CO_FLAG_PRIVATE},
-	{"6", "Printed Information",
-			"2.16.840.1.101.3.7.2.48.1", "1", "3001", SC_PKCS15_CO_FLAG_PRIVATE},
-	{"7", "Cardholder Facial Image", 
-			"2.16.840.1.101.3.7.2.96.48", "1", "6030", SC_PKCS15_CO_FLAG_PRIVATE},
-	{"8", "X.509 Certificate for Digital Signature",
+	{"05", "Cardholder Fingerprints",
+			"2.16.840.1.101.3.7.2.96.16", "01", "6010", SC_PKCS15_CO_FLAG_PRIVATE},
+	{"06", "Printed Information",
+			"2.16.840.1.101.3.7.2.48.1", "01", "3001", SC_PKCS15_CO_FLAG_PRIVATE},
+	{"07", "Cardholder Facial Image", 
+			"2.16.840.1.101.3.7.2.96.48", "01", "6030", SC_PKCS15_CO_FLAG_PRIVATE},
+	{"08", "X.509 Certificate for Digital Signature",
 			"2.16.840.1.101.3.7.2.1.0",  NULL, "0100", 0},
-	{"9", "X.509 Certificate for Key Management", 
+	{"09", "X.509 Certificate for Key Management", 
 			"2.16.840.1.101.3.7.2.1.2", NULL, "0102", 0},
 	{"10","X.509 Certificate for Card Authentication",
 			"2.16.840.1.101.3.7.2.5.0", NULL, "0500", 0},
@@ -325,15 +332,15 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 #define PIV_NUM_CERTS_AND_KEYS 24
 
 	static const cdata certs[PIV_NUM_CERTS_AND_KEYS] = {
-		{"1", "Certificate for PIV Authentication", 0, "0101cece", 0},
-		{"2", "Certificate for Digital Signature", 0, "0100cece", 0},
-		{"3", "Certificate for Key Management", 0, "0102cece", 0},
-		{"4", "Certificate for Card Authentication", 0, "0500cece", 0},
-		{"5", "Retired Certificate for Key Management 1", 0, "1001cece", 0},
-		{"6", "Retired Certificate for Key Management 2", 0, "1002cece", 0},
-		{"7", "Retired Certificate for Key Management 3", 0, "1003cece", 0},
-		{"8", "Retired Certificate for Key Management 4", 0, "1004cece", 0},
-		{"9", "Retired Certificate for Key Management 5", 0, "1005cece", 0},
+		{"01", "Certificate for PIV Authentication", 0, "0101cece", 0},
+		{"02", "Certificate for Digital Signature", 0, "0100cece", 0},
+		{"03", "Certificate for Key Management", 0, "0102cece", 0},
+		{"04", "Certificate for Card Authentication", 0, "0500cece", 0},
+		{"05", "Retired Certificate for Key Management 1", 0, "1001cece", 0},
+		{"06", "Retired Certificate for Key Management 2", 0, "1002cece", 0},
+		{"07", "Retired Certificate for Key Management 3", 0, "1003cece", 0},
+		{"08", "Retired Certificate for Key Management 4", 0, "1004cece", 0},
+		{"09", "Retired Certificate for Key Management 5", 0, "1005cece", 0},
 		{"10", "Retired Certificate for Key Management 6", 0, "1006cece", 0},
 		{"11", "Retired Certificate for Key Management 7", 0, "1007cece", 0},
 		{"12", "Retired Certificate for Key Management 8", 0, "1008cece", 0},
@@ -352,7 +359,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	};
 
 	static const pindata pins[] = {
-		{ "1", "PIV Card Holder pin", "", 0x80,
+		{ "01", "PIN", "", 0x80,
 		  /* label, flag  and ref will change if using global pin */
 		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
 		  8, 4, 8, 
@@ -361,7 +368,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		  SC_PKCS15_PIN_FLAG_LOCAL, 
 		  -1, 0xFF,
 		  SC_PKCS15_CO_FLAG_PRIVATE },
-		{ "2", "PIV PUK", "", 0x81, 
+		{ "02", "PIV PUK", "", 0x81, 
 		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
 		  8, 4, 8, 
 		  SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
@@ -383,221 +390,221 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	 */
 	static const pubdata pubkeys[PIV_NUM_CERTS_AND_KEYS] = {
 
-		{ "1", "PIV AUTH pubkey", 
+		{ "01", "PIV AUTH pubkey", 
 			 	/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT |
 			 		SC_PKCS15_PRKEY_USAGE_WRAP |
 					SC_PKCS15_PRKEY_USAGE_VERIFY |
 					SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_VERIFY,
-			"9A06", 0x9A, "1", 0, "PIV_9A_KEY"},
-		{ "2", "SIGN pubkey", 
+			"9A06", 0x9A, NULL, 0, "PIV_9A_KEY"},
+		{ "02", "SIGN pubkey", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT |
 					SC_PKCS15_PRKEY_USAGE_VERIFY |
 					SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER |
 					SC_PKCS15_PRKEY_USAGE_NONREPUDIATION,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_VERIFY |
 					SC_PKCS15_PRKEY_USAGE_NONREPUDIATION,
-			"9C06", 0x9C, "1", 0, "PIV_9C_KEY"},
-		{ "3", "KEY MAN pubkey", 
+			"9C06", 0x9C, NULL, 0, "PIV_9C_KEY"},
+		{ "03", "KEY MAN pubkey", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT| SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"9D06", 0x9D, "1", 0, "PIV_9D_KEY"},
-		{ "4", "CARD AUTH pubkey", 
+			"9D06", 0x9D, NULL, 0, "PIV_9D_KEY"},
+		{ "04", "CARD AUTH pubkey", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_VERIFY |
 					SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER, 
 				/*EC*/SC_PKCS15_PRKEY_USAGE_VERIFY,
-			"9E06", 0x9E, "0", 0, "PIV_9E_KEY"},  /* no pin, and avail in contactless */
+			"9E06", 0x9E, NULL, 0, "PIV_9E_KEY"},  /* no pin, and avail in contactless */
 
-		{ "5", "Retired KEY MAN 1",
+		{ "05", "Retired KEY MAN 1",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8206", 0x82, "1", 0, NULL},
-		{ "6", "Retired KEY MAN 2",
+			 "8206", 0x82, NULL, 0, NULL},
+		{ "06", "Retired KEY MAN 2",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8306", 0x83, "1", 0, NULL},
-		{ "7", "Retired KEY MAN 3",
+			 "8306", 0x83, NULL, 0, NULL},
+		{ "07", "Retired KEY MAN 3",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8406", 0x84, "1", 0, NULL},
-		{ "8", "Retired KEY MAN 4",
+			 "8406", 0x84, NULL, 0, NULL},
+		{ "08", "Retired KEY MAN 4",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8506", 0x85, "1", 0, NULL},
-		{ "9", "Retired KEY MAN 5",
+			 "8506", 0x85, NULL, 0, NULL},
+		{ "09", "Retired KEY MAN 5",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8606", 0x86, "1", 0, NULL},
+			 "8606", 0x86, NULL, 0, NULL},
 		{ "10", "Retired KEY MAN 6",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8706", 0x87, "1", 0, NULL},
+			 "8706", 0x87, NULL, 0, NULL},
 		{ "11", "Retired KEY MAN 7",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8806", 0x88, "1", 0, NULL},
+			 "8806", 0x88, NULL, 0, NULL},
 		{ "12", "Retired KEY MAN 8",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8906", 0x89, "1", 0, NULL},
+			 "8906", 0x89, NULL, 0, NULL},
 		{ "13", "Retired KEY MAN 9",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8A06", 0x8A, "1", 0, NULL},
+			 "8A06", 0x8A, NULL, 0, NULL},
 		{ "14", "Retired KEY MAN 10",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8B06", 0x8B, "1", 0, NULL},
+			 "8B06", 0x8B, NULL, 0, NULL},
 		{ "15", "Retired KEY MAN 11",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8C06", 0x8C, "1", 0, NULL},
+			 "8C06", 0x8C, NULL, 0, NULL},
 		{ "16", "Retired KEY MAN 12",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8D06", 0x8D, "1", 0, NULL},
+			 "8D06", 0x8D, NULL, 0, NULL},
 		{ "17", "Retired KEY MAN 13",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8E06", 0x8E, "1", 0, NULL},
+			 "8E06", 0x8E, NULL, 0, NULL},
 		{ "18", "Retired KEY MAN 14",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "8F06", 0x8F, "1", 0, NULL},
+			 "8F06", 0x8F, NULL, 0, NULL},
 		{ "19", "Retired KEY MAN 15",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9006", 0x90, "1", 0, NULL},
+			 "9006", 0x90, NULL, 0, NULL},
 		{ "20", "Retired KEY MAN 16",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9106", 0x91, "1", 0, NULL},
+			 "9106", 0x91, NULL, 0, NULL},
 		{ "21", "Retired KEY MAN 17",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9206", 0x92, "1", 0, NULL},
+			 "9206", 0x92, NULL, 0, NULL},
 		{ "22", "Retired KEY MAN 18",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9306", 0x93, "1", 0, NULL},
+			 "9306", 0x93, NULL, 0, NULL},
 		{ "23", "Retired KEY MAN 19",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9406", 0x94, "1", 0, NULL},
+			 "9406", 0x94, NULL, 0, NULL},
 		{ "24", "Retired KEY MAN 20",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_ENCRYPT | SC_PKCS15_PRKEY_USAGE_WRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			 "9506", 0x95, "1", 0, NULL} };
+			 "9506", 0x95, NULL, 0, NULL} };
 
 /*
  * note some of the SC_PKCS15_PRKEY values are dependent
  * on the key algorithm, and will be reset. 
  */
 	static const prdata prkeys[PIV_NUM_CERTS_AND_KEYS] = {
-		{ "1", "PIV AUTH key", 
+		{ "01", "PIV AUTH key", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT |
 					SC_PKCS15_PRKEY_USAGE_UNWRAP |
 					SC_PKCS15_PRKEY_USAGE_SIGN |
 					SC_PKCS15_PRKEY_USAGE_SIGNRECOVER,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_SIGN,
-			"", 0x9A, "1", SC_PKCS15_CO_FLAG_PRIVATE, 0},
-		{ "2", "SIGN key", 
+			"", 0x9A, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
+		{ "02", "SIGN key", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT |
 					SC_PKCS15_PRKEY_USAGE_SIGN |
 					SC_PKCS15_PRKEY_USAGE_SIGNRECOVER |
 					SC_PKCS15_PRKEY_USAGE_NONREPUDIATION,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_SIGN | 
 					SC_PKCS15_PRKEY_USAGE_NONREPUDIATION,
-			"", 0x9C, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
-		{ "3", "KEY MAN key", 
+			"", 0x9C, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+		{ "03", "KEY MAN key", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x9D, "1", SC_PKCS15_CO_FLAG_PRIVATE, 0},
-		{ "4", "CARD AUTH key", 
+			"", 0x9D, "01", SC_PKCS15_CO_FLAG_PRIVATE, 0},
+		{ "04", "CARD AUTH key", 
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_SIGN |
 				SC_PKCS15_PRKEY_USAGE_SIGNRECOVER,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_SIGN,
 			"", 0x9E, NULL, 0, 0}, /* no PIN needed, works with wireless */
-		{ "5", "Retired KEY MAN 1",
+		{ "05", "Retired KEY MAN 1",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x82, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
-		{ "6", "Retired KEY MAN 2",
+			"", 0x82, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+		{ "06", "Retired KEY MAN 2",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x83, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
-		{ "7", "Retired KEY MAN 3",
+			"", 0x83, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+		{ "07", "Retired KEY MAN 3",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x84, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
-		{ "8", "Retired KEY MAN 4",
+			"", 0x84, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+		{ "08", "Retired KEY MAN 4",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x85, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
-		{ "9", "Retired KEY MAN 5",
+			"", 0x85, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+		{ "09", "Retired KEY MAN 5",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x86, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x86, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "10", "Retired KEY MAN 6",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x87, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x87, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "11", "Retired KEY MAN 7",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x88, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x88, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "12", "Retired KEY MAN 8",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x89, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x89, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "13", "Retired KEY MAN 9",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8A, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8A, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "14", "Retired KEY MAN 10",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8B, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8B, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "15", "Retired KEY MAN 11",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8C, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8C, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "16", "Retired KEY MAN 12",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8D, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8D, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "17", "Retired KEY MAN 13",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8E, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8E, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "18", "Retired KEY MAN 14",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x8F, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x8F, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "19", "Retired KEY MAN 15",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x90, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x90, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "20", "Retired KEY MAN 16",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x91, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x91, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "21", "Retired KEY MAN 17",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x92, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x92, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "22", "Retired KEY MAN 18",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x93, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x93, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "23", "Retired KEY MAN 19",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x94, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1},
+			"", 0x94, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1},
 		{ "24", "Retired KEY MAN 20",
 				/*RSA*/SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 				/*EC*/SC_PKCS15_PRKEY_USAGE_DERIVE,
-			"", 0x95, "1", SC_PKCS15_CO_FLAG_PRIVATE, 1}
+			"", 0x95, "01", SC_PKCS15_CO_FLAG_PRIVATE, 1}
 	};
 
 	int    r, i;
@@ -605,9 +612,12 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	sc_serial_number_t serial;
 	char buf[SC_MAX_SERIALNR * 2 + 1];
 	common_key_info ckis[PIV_NUM_CERTS_AND_KEYS];
-
+	int follows_nist_fascn = 0;
+	char *token_name = NULL;
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	memset(&serial, 0, sizeof(serial));
 
 	/* could read this off card if needed */
 
@@ -629,6 +639,10 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 	} else {
 		sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 		p15card->tokeninfo->serial_number = strdup(buf);
+	}
+	/* US gov issued PIVs have CHUID with a FASCN that does not start with 9999 */
+	if (serial.len == 25 && !(serial.value[0] == 0xD4 && serial.value[1] == 0xE7 && serial.value[2] == 0x39 && (serial.value[3] | 0x7F) == 0xFF)) {
+	    follows_nist_fascn = 1;
 	}
 
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "PIV-II adding objects...");
@@ -696,13 +710,18 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		struct sc_pkcs15_cert_info cert_info;
 		struct sc_pkcs15_object    cert_obj;
 		sc_pkcs15_der_t   cert_der;
-		sc_pkcs15_cert_t *cert_out;
+		sc_pkcs15_cert_t *cert_out = NULL;
 		
 		ckis[i].cert_found = 0;
 		ckis[i].key_alg = -1;
 		ckis[i].pubkey_found = 0;
 		ckis[i].pubkey_from_file = 0;
 		ckis[i].pubkey_len = 0;
+		ckis[i].pubkey_from_cert = NULL;
+		ckis[i].cert_keyUsage = 0;
+		ckis[i].cert_keyUsage_present = 0;
+		ckis[i].pub_usage = 0;
+		ckis[i].priv_usage = 0;
 
 		memset(&cert_info, 0, sizeof(cert_info));
 		memset(&cert_obj,  0, sizeof(cert_obj));
@@ -723,7 +742,7 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 
 		r = sc_pkcs15_read_file(p15card, &cert_info.path, &cert_der.value, &cert_der.len);
 
-		if (r) { 
+		if (r) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "No cert found,i=%d", i);
 			continue;
 		}
@@ -731,30 +750,170 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 		ckis[i].cert_found = 1;
 		/* cache it using the PKCS15 emulation objects */
 		/* as it does not change */
-               	if (cert_der.value) {
-               	 	cert_info.value.value = cert_der.value;
-                       	cert_info.value.len = cert_der.len;
-                       	cert_info.path.len = 0; /* use in mem cert from now on */
-               	}
+		if (cert_der.value) {
+			cert_info.value.value = cert_der.value;
+			cert_info.value.len = cert_der.len;
+			if (!p15card->opts.use_file_cache) {
+				cert_info.path.len = 0; /* use in mem cert from now on */
+			}
+		}
 		/* following will find the cached cert in cert_info */
 		r =  sc_pkcs15_read_certificate(p15card, &cert_info, &cert_out);
 		if (r < 0 || cert_out->key == NULL) {
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Failed to read/parse the certificate r=%d",r);
+			if (cert_out != NULL)
+				sc_pkcs15_free_certificate(cert_out);
 			continue;
 		}
+
+		/* set the token name to the name of the CN of the first certificate */
+		if (!token_name) {
+			u8 * cn_name = NULL;
+			size_t cn_len = 0;
+			static const struct sc_object_id cn_oid = {{ 2, 5, 4, 3, -1 }};
+			r = sc_pkcs15_get_name_from_dn(card->ctx, cert_out->subject,
+				cert_out->subject_len, &cn_oid, &cn_name, &cn_len);
+			if (r == SC_SUCCESS) {
+				token_name = malloc (cn_len+1);
+				if (!token_name) {
+					sc_pkcs15_free_certificate(cert_out);
+					free(cn_name);
+					SC_FUNC_RETURN(card->ctx,
+						SC_ERROR_OUT_OF_MEMORY, r);
+				}
+				memcpy(token_name, cn_name, cn_len);
+				free(cn_name);
+				token_name[cn_len] = 0;
+				free(p15card->tokeninfo->label);
+				p15card->tokeninfo->label = token_name;
+			}
+		}
+
+		/* 
+		 * get keyUsage if present save in ckis[i]
+		 * Will only use it if this in a non FED issued card
+		 * which has a CHUID with FASC-N not starting with 9999
+		 */
+
+		if (follows_nist_fascn == 0) {
+			struct sc_object_id keyUsage_oid={{2,5,29,15,-1}};
+			int r = 0;
+
+			r = sc_pkcs15_get_bitstring_extension(card->ctx, cert_out,
+				&keyUsage_oid,
+				&ckis[i].cert_keyUsage, NULL);
+			if ( r >= 0)
+				ckis[i].cert_keyUsage_present = 1;
+				/* TODO if no key usage, we could set all uses */
+		}
+
+
 		ckis[i].key_alg = cert_out->key->algorithm;
 		switch (cert_out->key->algorithm) {
 			case SC_ALGORITHM_RSA:
 				/* save pubkey_len for pub and priv */
 				ckis[i].pubkey_len = cert_out->key->u.rsa.modulus.len * 8;
+				/* See RFC 5280 and PKCS#11 V2.40 */
+				if (ckis[i].cert_keyUsage_present) {
+					if (ckis[i].cert_keyUsage & SC_X509_DIGITAL_SIGNATURE) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT /* extra*/
+									|SC_PKCS15_PRKEY_USAGE_WRAP
+									|SC_PKCS15_PRKEY_USAGE_VERIFY
+									|SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER;
+					        ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT /*extra */
+									|SC_PKCS15_PRKEY_USAGE_UNWRAP
+									|SC_PKCS15_PRKEY_USAGE_SIGN
+									|SC_PKCS15_PRKEY_USAGE_SIGNRECOVER;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_NON_REPUDIATION) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT /* extra */
+									|SC_PKCS15_PRKEY_USAGE_NONREPUDIATION
+									|SC_PKCS15_PRKEY_USAGE_VERIFY
+									|SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT /*extra*/
+									|SC_PKCS15_PRKEY_USAGE_NONREPUDIATION
+									|SC_PKCS15_PRKEY_USAGE_SIGN
+									|SC_PKCS15_PRKEY_USAGE_SIGNRECOVER;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_ENCIPHERMENT) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT| SC_PKCS15_PRKEY_USAGE_WRAP;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT| SC_PKCS15_PRKEY_USAGE_UNWRAP;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_DATA_ENCIPHERMENT) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_AGREEMENT) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_CERT_SIGN) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY|SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER;
+						ckis[i].priv_usage |=  SC_PKCS15_PRKEY_USAGE_SIGN;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_CRL_SIGN) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY|SC_PKCS15_PRKEY_USAGE_VERIFYRECOVER;
+						ckis[i].priv_usage |=  SC_PKCS15_PRKEY_USAGE_SIGN;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_ENCIPHER_ONLY) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT|SC_PKCS15_PRKEY_USAGE_WRAP;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT|SC_PKCS15_PRKEY_USAGE_UNWRAP;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_DECIPHER_ONLY) { /* TODO is this correct */
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_DECRYPT|SC_PKCS15_PRKEY_USAGE_UNWRAP;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_ENCRYPT|SC_PKCS15_PRKEY_USAGE_WRAP;
+					}
+				}
 				break;
+
 			case SC_ALGORITHM_EC:
 				ckis[i].pubkey_len = cert_out->key->u.ec.params.field_length;
+				if (ckis[i].cert_keyUsage_present) {
+					if (ckis[i].cert_keyUsage & SC_X509_DIGITAL_SIGNATURE) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_SIGN;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_NON_REPUDIATION) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_ENCIPHERMENT) {
+						ckis[i].pub_usage |= 0;
+						ckis[i].priv_usage |= 0;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_DATA_ENCIPHERMENT) {
+						ckis[i].pub_usage |= 0;
+						ckis[i].priv_usage |= 0;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_AGREEMENT) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_DERIVE;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_KEY_CERT_SIGN) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY;
+						ckis[i].priv_usage |= SC_PKCS15_PRKEY_USAGE_SIGN;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_CRL_SIGN) {
+						ckis[i].pub_usage |= SC_PKCS15_PRKEY_USAGE_VERIFY;
+						ckis[i].priv_usage |=  SC_PKCS15_PRKEY_USAGE_SIGN;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_ENCIPHER_ONLY) {
+						ckis[i].pub_usage |= 0;
+						ckis[i].priv_usage |= 0;
+					}
+					if (ckis[i].cert_keyUsage & SC_X509_DECIPHER_ONLY) {
+						ckis[i].pub_usage |= 0;
+						ckis[i].priv_usage |= 0;
+					}
+				}
 				break;
+
 			default:
 				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsuported key.algorithm %d", cert_out->key->algorithm);
 				ckis[i].pubkey_len = 0; /* set some value for now */
 		}
+		ckis[i].pubkey_from_cert = cert_out->key;
+		cert_out->key = NULL;
 		sc_pkcs15_free_certificate(cert_out);
 
 		r = sc_pkcs15emu_add_x509_cert(p15card, &cert_obj, &cert_info);
@@ -795,10 +954,18 @@ static int sc_pkcs15emu_piv_init(sc_pkcs15_card_t *p15card)
 			pin_info.attrs.pin.reference = pin_ref;
 			pin_info.attrs.pin.flags &= ~SC_PKCS15_PIN_FLAG_LOCAL;
 			label = "Global PIN";
-		} 
+		}
 sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 		strncpy(pin_obj.label, label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 		pin_obj.flags = pins[i].obj_flags;
+		if (i == 0 && pin_info.attrs.pin.reference == 0x80) {
+			/*
+			 * according to description of "RESET RETRY COUNTER"
+			 * command in specs PUK can only unblock PIV PIN
+			 */
+			pin_obj.auth_id.len = 1;
+			pin_obj.auth_id.value[0] = 2;
+		}
 
 		r = sc_pkcs15emu_add_pin_obj(p15card, &pin_obj, &pin_info);
 		if (r < 0)
@@ -869,11 +1036,13 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 			
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"Adding pubkey from file %s",filename);
 
-			r = sc_pkcs15_pubkey_from_spki_filename(card->ctx, 
-						filename,
-						&p15_key);
+			r = sc_pkcs15_pubkey_from_spki_file(card->ctx,  filename, &p15_key);
 			if (r < 0) 
 				continue;
+
+			/* Lets also try another method. */
+			r = sc_pkcs15_encode_pubkey_as_spki(card->ctx, p15_key, &pubkey_info.direct.spki.value, &pubkey_info.direct.spki.len);
+        		LOG_TEST_RET(card->ctx, r, "SPKI encode public key error");
 			
 			/* Only get here if no cert, and the the above found the
 			 * pub key file (actually the SPKI version). This only 
@@ -906,11 +1075,21 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 			pubkey_obj.emulated = p15_key;
 			p15_key = NULL;
 		}
+		else if (ckis[i].pubkey_from_cert)   {
+			r = sc_pkcs15_encode_pubkey_as_spki(card->ctx, ckis[i].pubkey_from_cert, &pubkey_info.direct.spki.value, &pubkey_info.direct.spki.len);
+        		LOG_TEST_RET(card->ctx, r, "SPKI encode public key error");
+
+			pubkey_obj.emulated = ckis[i].pubkey_from_cert;
+		}
 
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"adding pubkey for %d keyalg=%d",i, ckis[i].key_alg);
 		switch (ckis[i].key_alg) {
 			case SC_ALGORITHM_RSA:
-				pubkey_info.usage = pubkeys[i].usage_rsa;
+				if (ckis[i].cert_keyUsage_present) {
+					pubkey_info.usage =  ckis[i].pub_usage;
+				} else {
+					pubkey_info.usage = pubkeys[i].usage_rsa;
+				}
 				pubkey_info.modulus_length = ckis[i].pubkey_len;
 				strncpy(pubkey_obj.label, pubkeys[i].label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 
@@ -921,7 +1100,12 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 				ckis[i].pubkey_found = 1;
 				break;
 			case SC_ALGORITHM_EC:
-				pubkey_info.usage = pubkeys[i].usage_ec;
+				if (ckis[i].cert_keyUsage_present) {
+					pubkey_info.usage = ckis[i].pub_usage;
+				} else {
+				    pubkey_info.usage = pubkeys[i].usage_ec;
+				}
+
 				pubkey_info.field_length = ckis[i].pubkey_len; 
 				strncpy(pubkey_obj.label, pubkeys[i].label, SC_PKCS15_MAX_LABEL_SIZE - 1);
 
@@ -934,6 +1118,8 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"key_alg %d not supported", ckis[i].key_alg);
 				continue;
 		}
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"USAGE: cert_keyUsage_present:%d usage:0x%8.8x",
+				ckis[i].cert_keyUsage_present ,pubkey_info.usage); 
 	}
 
 
@@ -976,13 +1162,21 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 		}
 
 		switch (ckis[i].key_alg) {
-			case SC_ALGORITHM_RSA: 
-				prkey_info.usage         |= prkeys[i].usage_rsa;
+			case SC_ALGORITHM_RSA:
+				if(ckis[i].cert_keyUsage_present) {
+					prkey_info.usage |= ckis[i].priv_usage;
+				} else {
+					prkey_info.usage |= prkeys[i].usage_rsa;
+				}
 				prkey_info.modulus_length= ckis[i].pubkey_len;
 				r = sc_pkcs15emu_add_rsa_prkey(p15card, &prkey_obj, &prkey_info);
 				break;
-		 	case SC_ALGORITHM_EC: 
-				prkey_info.usage         |= prkeys[i].usage_ec;
+			case SC_ALGORITHM_EC:
+				if (ckis[i].cert_keyUsage_present) {
+					prkey_info.usage  |= ckis[i].priv_usage;
+				} else {
+					prkey_info.usage  |= prkeys[i].usage_ec;
+				}
 				prkey_info.field_length = ckis[i].pubkey_len;
 				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE added key_alg %2.2x prkey_obj.flags %8.8x",
 					 ckis[i].key_alg, prkey_obj.flags);
@@ -992,6 +1186,7 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Unsupported key_alg %d", ckis[i].key_alg);
 				r = 0; /* we just skip this one */
 		}
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"USAGE: cert_keyUsage_present:%d usage:0x%8.8x", ckis[i].cert_keyUsage_present ,prkey_info.usage);
 		if (r < 0)
 			SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, r);
 	}
@@ -1002,7 +1197,7 @@ sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "DEE Adding pin %d label=%s",i, label);
 }
 
 int sc_pkcs15emu_piv_init_ex(sc_pkcs15_card_t *p15card,
-				  sc_pkcs15emu_opt_t *opts)
+		struct sc_aid *aid, sc_pkcs15emu_opt_t *opts)
 {
 	sc_card_t   *card = p15card->card;
 	sc_context_t    *ctx = card->ctx;

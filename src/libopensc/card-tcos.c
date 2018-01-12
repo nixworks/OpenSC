@@ -20,7 +20,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <ctype.h>
@@ -42,6 +44,7 @@ static struct sc_atr_table tcos_atrs[] = {
 	{ "3B:BA:96:00:81:31:86:5D:00:64:05:7B:02:03:31:80:90:00:7D", NULL, NULL, SC_CARD_TYPE_TCOS_V2, 0, NULL },
 	/* Philips P5CT072 */
 	{ "3B:BF:96:00:81:31:FE:5D:00:64:04:11:03:01:31:C0:73:F7:01:D0:00:90:00:7D", NULL, NULL, SC_CARD_TYPE_TCOS_V3, 0, NULL },
+	{ "3B:BF:96:00:81:31:FE:5D:00:64:04:11:04:0F:31:C0:73:F7:01:D0:00:90:00:74", NULL, NULL, SC_CARD_TYPE_TCOS_V3, 0, NULL },
 	/* Philips P5CT080 */
 	{ "3B:BF:B6:00:81:31:FE:5D:00:64:04:28:03:02:31:C0:73:F7:01:D0:00:90:00:67", NULL, NULL, SC_CARD_TYPE_TCOS_V3, 0, NULL },
 	{ NULL, NULL, NULL, 0, 0, NULL }
@@ -161,8 +164,6 @@ static int tcos_construct_fci(const sc_file_t *file,
         /* Directory name */
         if (file->type == SC_FILE_TYPE_DF) {
                 if (file->namelen) {
-                        if (file->namelen > 16 || !file->name)
-                                return SC_ERROR_INVALID_ARGUMENTS;
                         sc_asn1_put_tag(0x84, file->name, file->namelen,
                                         p, 16, &p);
                 }
@@ -355,6 +356,7 @@ static int tcos_select_file(sc_card_t *card,
 	switch (in_path->type) {
 	case SC_PATH_TYPE_FILE_ID:
 		if (pathlen != 2) return SC_ERROR_INVALID_ARGUMENTS;
+		/* fall through */
 	case SC_PATH_TYPE_FROM_CURRENT:
 		apdu.p1 = 9;
 		break;
@@ -402,6 +404,7 @@ static int tcos_select_file(sc_card_t *card,
 
 	file = sc_file_new();
 	if (file == NULL) SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
+	*file_out = file;
 	file->path = *in_path;
 
 	for(i=2; i+1<apdu.resplen && i+1+apdu.resp[i+1]<apdu.resplen; i+=2+apdu.resp[i+1]){
@@ -440,7 +443,6 @@ static int tcos_select_file(sc_card_t *card,
 		}
 	}
 	file->magic = SC_FILE_MAGIC;
-	*file_out = file;
 
 	parse_sec_attr(card, file, file->sec_attr, file->sec_attr_len);
 
@@ -471,8 +473,8 @@ static int tcos_list_files(sc_card_t *card, u8 *buf, size_t buflen)
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "List Dir failed");
 		if (apdu.resplen > buflen) return SC_ERROR_BUFFER_TOO_SMALL;
 		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
-			"got %d %s-FileIDs\n", apdu.resplen/2,
-			p1==1 ? "DF" : "EF");
+			 "got %"SC_FORMAT_LEN_SIZE_T"u %s-FileIDs\n",
+			 apdu.resplen / 2, p1 == 1 ? "DF" : "EF");
 
 		memcpy(buf, apdu.resp, apdu.resplen);
 		buf += apdu.resplen;
@@ -529,8 +531,8 @@ static int tcos_set_security_env(sc_card_t *card, const sc_security_env_t *env, 
 			"No Key-Reference in SecEnvironment\n");
 	else
 		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
-			"Key-Reference %02X (len=%d)\n",
-			env->key_ref[0], env->key_ref_len);
+			 "Key-Reference %02X (len=%"SC_FORMAT_LEN_SIZE_T"u)\n",
+			 env->key_ref[0], env->key_ref_len);
 	/* Key-Reference 0x80 ?? */
 	default_key= !(env->flags & SC_SEC_ENV_KEY_REF_PRESENT) || (env->key_ref_len==1 && env->key_ref[0]==0x80);
 	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
@@ -704,33 +706,28 @@ static int tcos_setperm(sc_card_t *card, int enable_nullpin)
 
 static int tcos_get_serialnr(sc_card_t *card, sc_serial_number_t *serial)
 {
-	int       r;
-	u8        buf[64];
-	size_t    len;
-	sc_path_t tpath;
-	sc_file_t *tfile = NULL;
+	int r;
+	const unsigned char *iccsn;
+	size_t iccsn_len;
 
-	if (!serial) return SC_ERROR_INVALID_ARGUMENTS;
+	if (!serial)
+		return SC_ERROR_INVALID_ARGUMENTS;
 
 	/* see if we have cached serial number */
 	if (card->serialnr.len) {
 		memcpy(serial, &card->serialnr, sizeof(*serial));
 		return SC_SUCCESS;
 	}
-	sc_format_path("3F002F02", &tpath);
-	r = sc_select_file(card, &tpath, &tfile);
-	if (r < 0) return r;
 
-	len = tfile->size;
-	sc_file_free(tfile);
-	if (len > sizeof(buf) || len < 12) return SC_ERROR_INTERNAL;
+	r = sc_parse_ef_gdo(card, &iccsn, &iccsn_len, NULL, 0);
+	if (r < 0)
+		return r;
 
-	r = sc_read_binary(card, 0, buf, len, 0);
-	if (r < 0) return r;
-	if (buf[0] != 0x5a || buf[1] > len - 2) return SC_ERROR_INTERNAL;
+	/* cache serial number */
+	memcpy(card->serialnr.value, iccsn, MIN(iccsn_len, SC_MAX_SERIALNR));
+	card->serialnr.len = MIN(iccsn_len, SC_MAX_SERIALNR);
 
-	card->serialnr.len = buf[1];	
-	memcpy(card->serialnr.value, buf+2, buf[1]);
+	/* copy and return serial number */
 	memcpy(serial, &card->serialnr, sizeof(*serial));
 
 	return SC_SUCCESS;

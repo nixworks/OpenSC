@@ -41,9 +41,9 @@ static struct {
 	{"DF01C100", 1, "Telesec Authentifizierungs Zertifikat"},
 	{"DF014371", 0, "User Authentifizierungs Zertifikat1"},
 	{"DF014372", 0, "User Authentifizierungs Zertifikat2"},
-	{"DF01C200", 1, "Telesec Verschlüsselungs Zertifikat"},
-	{"DF0143B1", 0, "User Verschlüsselungs Zertifikat1"},
-	{"DF0143B2", 0, "User Verschlüsselungs Zertifikat2"},
+	{"DF01C200", 1, "Telesec Verschluesselungs Zertifikat"},
+	{"DF0143B1", 0, "User Verschluesselungs Zertifikat1"},
+	{"DF0143B2", 0, "User Verschluesselungs Zertifikat2"},
 };
 
 static struct {
@@ -52,7 +52,7 @@ static struct {
 	const char *label;
 	int   p1, p2;
 	int   tries;
-	int   len;
+	size_t len;
 	u8    value[32];
 } pinlist[]={
 	{"3F005000",     "pin",  "global PIN",  1,-1, 0, 0,
@@ -144,9 +144,9 @@ static void show_certs(sc_card_t *card)
 			printf(", Len=%d\n", (q[2]<<8)|q[3]);
 			if((c=d2i_X509(NULL,&q,f->size))){
 				char buf2[2000];
-				X509_NAME_get_text_by_NID(c->cert_info->subject, NID_commonName, buf2,sizeof(buf2));
+				X509_NAME_get_text_by_NID(X509_get_subject_name(c), NID_commonName, buf2,sizeof(buf2));
 				printf("  Subject-CN: %s\n", buf2);
-				X509_NAME_get_text_by_NID(c->cert_info->issuer, NID_commonName, buf2,sizeof(buf2));
+				X509_NAME_get_text_by_NID(X509_get_issuer_name(c), NID_commonName, buf2,sizeof(buf2));
 				printf("  Issuer-CN:  %s\n", buf2);
 				X509_free(c);
 			} else printf("  Invalid Certificate-Data\n");
@@ -404,25 +404,16 @@ static int pin_string2int(char *s) {
 	return -1;
 }
 
-static void set_pin(u8 *data, int  *pinlen, char *pin)
+static void set_pin(u8 *data, size_t *pinlen, char *pin)
 {
-	int hex, i, j=0, len;
-	char *p;
+	int hex;
+	size_t i, len;
 
 	len=strlen(pin);
 	hex=(len>=5 && len%3==2);
 	if(hex){
-		len=(len+1)/3;
-		hex=(len<=32);
-	}
-	for(i=0;hex && i<len;++i){
-		if(i>0 && pin[3*i-1]!=':') hex=0;
-		else j=strtol(pin+3*i,&p,16);
-		if(hex && (j<0 || j>255 || (p-pin)!=3*i+2)) hex=0;
-	}
-	if(hex){
-		for(i=0;hex && i<len;++i) data[i]=strtol(pin+3*i,&p,16);
-		*pinlen=len;
+		*pinlen = sizeof (pinlist[0].value);
+		sc_hex_to_bin(pin, data, pinlen);
 	} else {
 		len=strlen(pin); if(len>32) len=32;
 		for(i=0;i<len;++i) data[i]=((u8*)pin)[i];
@@ -452,8 +443,8 @@ int main(
 	int do_help=0, do_unblock=0, do_change=0, do_nullpin=0, do_readcert=0, do_writecert=0;
 	u8 newpin[32];
 	char *certfile=NULL, *p;
-	int r, oerr=0, reader=0, debug=0, newlen=0, pin_nr=-1, cert_nr=-1;
-	size_t i;
+	int r, oerr=0, reader=0, debug=0, pin_nr=-1, cert_nr=-1;
+	size_t i, newlen=0;
 
 	while((r=getopt_long(argc,argv,"hvr:p:u:0:1:",options,NULL))!=EOF) switch(r){
 		case 'h': ++do_help; break;
@@ -567,7 +558,9 @@ int main(
 		exit(1);
 	}
 	printf("\nCard detected (driver: %s)\nATR:", card->driver->name);
-	for(i=0;i<card->atr.len;++i) printf("%c%02X", i?':':' ', card->atr.value[i]); printf("\n");
+	for (i = 0; i < card->atr.len; ++i)
+		printf("%c%02X", i?':':' ', card->atr.value[i]);
+	printf("\n");
 
 	if((r = sc_lock(card))<0){
 		fprintf(stderr,"Lock failed: %s\n", sc_strerror(r));

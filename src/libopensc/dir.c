@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
@@ -36,7 +38,8 @@ struct app_entry {
 static const struct app_entry apps[] = {
 	{ (const u8 *) "\xA0\x00\x00\x00\x63PKCS-15", 12, "PKCS #15" },
 	{ (const u8 *) "\xA0\x00\x00\x01\x77PKCS-15", 12, "Belgian eID" },
-	{ (const u8 *) "\x44\x46\x20\x69\x73\x73\x75\x65\x72", 9, "Portugal eID" }
+	{ (const u8 *) "\x44\x46\x20\x69\x73\x73\x75\x65\x72", 9, "Portugal eID" },
+	{ (const u8 *) "\xE8\x28\xBD\x08\x0F\xA0\x00\x00\x01\x67\x45\x53\x49\x47\x4E", 15, "ESIGN"}
 };
 
 static const struct sc_asn1_entry c_asn1_dirrecord[] = {
@@ -58,6 +61,7 @@ parse_dir_record(sc_card_t *card, u8 ** buf, size_t *buflen, int rec_nr)
 {
 	struct sc_context *ctx = card->ctx;
 	struct sc_asn1_entry asn1_dirrecord[5], asn1_dir[2];
+	scconf_block *conf_block = NULL;
 	sc_app_info_t *app = NULL;
 	struct sc_aid aid;
 	u8 label[128], path[128], ddo[128];
@@ -80,6 +84,25 @@ parse_dir_record(sc_card_t *card, u8 ** buf, size_t *buflen, int rec_nr)
 		LOG_FUNC_RETURN(ctx, r);
 	LOG_TEST_RET(ctx, r, "EF(DIR) parsing failed");
 
+	conf_block = sc_get_conf_block(ctx, "framework", "pkcs15", 1);
+	if (conf_block)   {
+		scconf_block **blocks = NULL;
+		char aid_str[SC_MAX_AID_STRING_SIZE];
+		int ignore_app = 0;
+
+		sc_bin_to_hex(aid.value, aid.len, aid_str, sizeof(aid_str), 0);
+		blocks = scconf_find_blocks(card->ctx->conf, conf_block, "application", aid_str);
+		if (blocks)   {
+			ignore_app = (blocks[0] && scconf_get_str(blocks[0], "disable", 0));
+                        free(blocks);
+		 }
+
+		if (ignore_app)   {
+			sc_log(ctx, "Application '%s' ignored", aid_str);
+			LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+		}
+	}
+
 	app = calloc(1, sizeof(struct sc_app_info));
 	if (app == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
@@ -91,7 +114,7 @@ parse_dir_record(sc_card_t *card, u8 ** buf, size_t *buflen, int rec_nr)
 	else
 		app->label = NULL;
 
-	if (asn1_dirrecord[2].flags & SC_ASN1_PRESENT) {
+	if (asn1_dirrecord[2].flags & SC_ASN1_PRESENT && path_len > 0) {
 		/* application path present: ignore AID */
 		if (path_len > SC_MAX_PATH_SIZE) {
 			free(app);
@@ -142,10 +165,8 @@ int sc_enum_apps(sc_card_t *card)
 		card->app_count = 0;
 
 	sc_format_path("3F002F00", &path);
-	if (card->ef_dir != NULL) {
-		sc_file_free(card->ef_dir);
-		card->ef_dir = NULL;
-	}
+	sc_file_free(card->ef_dir);
+	card->ef_dir = NULL;
 	r = sc_select_file(card, &path, &card->ef_dir);
 	LOG_TEST_RET(ctx, r, "Cannot select EF.DIR file");
 

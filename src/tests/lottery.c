@@ -4,6 +4,8 @@
 
 #include "config.h"
 
+#include <errno.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #ifdef HAVE_UNISTD_H
@@ -22,7 +24,7 @@ int main(int argc, char *argv[])
 	struct timeval tv1, tv2;
 	u8 buf[14];
 
-	i = sc_test_init(&argc, argv);
+	sc_test_init(&argc, argv);
 	for (i = 0; i < 39; i++)
 		freq[i] = 0;
 	c = 0;
@@ -32,8 +34,12 @@ int main(int argc, char *argv[])
 		for (i = 0; i < 39; i++) {
 			nbuf[i] = i + 1;
 		}
-		if (c == 0)
-			gettimeofday(&tv1, NULL);
+		if (c == 0) {
+			if (0 != gettimeofday(&tv1, NULL)) {
+				fprintf(stderr, "gettimeofday() failed: %s\n", strerror(errno));
+				return 1;
+			}
+		}
 		sc_lock(card);
 		r = sc_get_challenge(card, buf, 14);
 		sc_unlock(card);
@@ -43,7 +49,7 @@ int main(int argc, char *argv[])
 			printf("Lottery: ");
 			for (i = 0; i < 7; i++) {
 				unsigned short s = buf[2 * i] + (buf[2 * i + 1] << 8);
-				int lot = s % (left + 1);
+				int lot = s % left;
 				int num = nbuf[lot];
 
 				nbuf[lot] = nbuf[left - 1];

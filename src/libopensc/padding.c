@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -103,8 +105,9 @@ static int sc_pkcs1_add_01_padding(const u8 *in, size_t in_len,
 	return SC_SUCCESS;
 }
 
-int sc_pkcs1_strip_01_padding(const u8 *in_dat, size_t in_len,
-	u8 *out, size_t *out_len)
+int
+sc_pkcs1_strip_01_padding(struct sc_context *ctx, const u8 *in_dat, size_t in_len,
+		u8 *out, size_t *out_len)
 {
 	const u8 *tmp = in_dat;
 	size_t    len;
@@ -134,37 +137,45 @@ int sc_pkcs1_strip_01_padding(const u8 *in_dat, size_t in_len,
 	return SC_SUCCESS;
 }
 
+
 /* remove pkcs1 BT02 padding (adding BT02 padding is currently not
  * needed/implemented) */
-int sc_pkcs1_strip_02_padding(const u8 *data, size_t len, u8 *out,
-	size_t *out_len)
+int
+sc_pkcs1_strip_02_padding(sc_context_t *ctx, const u8 *data, size_t len, u8 *out, size_t *out_len)
 {
 	unsigned int	n = 0;
 
+	LOG_FUNC_CALLED(ctx);
 	if (data == NULL || len < 3)
-		return SC_ERROR_INTERNAL;
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+
 	/* skip leading zero byte */
 	if (*data == 0) {
 		data++;
 		len--;
 	}
 	if (data[0] != 0x02)
-		return SC_ERROR_WRONG_PADDING;
+		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
 	/* skip over padding bytes */
 	for (n = 1; n < len && data[n]; n++)
 		;
 	/* Must be at least 8 pad bytes */
 	if (n >= len || n < 9)
-		return SC_ERROR_WRONG_PADDING;
+		LOG_FUNC_RETURN(ctx, SC_ERROR_WRONG_PADDING);
 	n++;
 	if (out == NULL)
 		/* just check the padding */
-		return SC_SUCCESS;
+		LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+
 	/* Now move decrypted contents to head of buffer */
-	if (*out_len < len -  n)
-		return SC_ERROR_INTERNAL;
-	memmove(out, data + n, len - n);
-	return len - n;
+	if (*out_len < len - n)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INTERNAL);
+	*out_len = len - n;
+	memmove(out, data + n, *out_len);
+
+	sc_log(ctx, "stripped output(%"SC_FORMAT_LEN_SIZE_T"u): %s", len - n,
+	       sc_dump_hex(out, len - n));
+	LOG_FUNC_RETURN(ctx, len - n);
 }
 
 /* add/remove DigestInfo prefix */
@@ -274,7 +285,7 @@ int sc_get_encoding_flags(sc_context_t *ctx,
 	if (pflags == NULL || sflags == NULL)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "iFlags 0x%X, card capabilities 0x%X", iflags, caps);
+	sc_log(ctx, "iFlags 0x%lX, card capabilities 0x%lX", iflags, caps);
 	for (i = 0; digest_info_prefix[i].algorithm != 0; i++) {
 		if (iflags & digest_info_prefix[i].algorithm) {
 			if (digest_info_prefix[i].algorithm != SC_ALGORITHM_RSA_HASH_NONE &&
@@ -303,6 +314,6 @@ int sc_get_encoding_flags(sc_context_t *ctx,
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "unsupported algorithm");
 	}
 
-	sc_log(ctx, "pad flags 0x%X, secure algorithm flags 0x%X", *pflags, *sflags);
+	sc_log(ctx, "pad flags 0x%lX, secure algorithm flags 0x%lX", *pflags, *sflags);
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }

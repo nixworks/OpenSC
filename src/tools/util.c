@@ -30,6 +30,7 @@
 #endif
 #include <ctype.h>
 #include "util.h"
+#include "ui/notify.h"
 
 int
 is_string_valid_atr(const char *atr_str)
@@ -47,12 +48,14 @@ is_string_valid_atr(const char *atr_str)
 }
 
 int
-util_connect_card(sc_context_t *ctx, sc_card_t **cardp,
-		 const char *reader_id, int do_wait, int verbose)
+util_connect_card_ex(sc_context_t *ctx, sc_card_t **cardp,
+		 const char *reader_id, int do_wait, int do_lock, int verbose)
 {
 	struct sc_reader *reader = NULL, *found = NULL;
 	struct sc_card *card = NULL;
 	int r;
+
+	sc_notify_init();
 
 	if (do_wait) {
 		unsigned int event;
@@ -156,15 +159,24 @@ autofound:
 	if (verbose)
 		printf("Using card driver %s.\n", card->driver->name);
 
-	r = sc_lock(card);
-	if (r < 0) {
-		fprintf(stderr, "Failed to lock card: %s\n", sc_strerror(r));
-		sc_disconnect_card(card);
-		return 1;
+	if (do_lock) {
+		r = sc_lock(card);
+		if (r < 0) {
+			fprintf(stderr, "Failed to lock card: %s\n", sc_strerror(r));
+			sc_disconnect_card(card);
+			return 1;
+		}
 	}
 
 	*cardp = card;
 	return 0;
+}
+
+int
+util_connect_card(sc_context_t *ctx, sc_card_t **cardp,
+		 const char *reader_id, int do_wait, int verbose)
+{
+	return util_connect_card_ex(ctx, cardp, reader_id, do_wait, 1, verbose);
 }
 
 void util_print_binary(FILE *f, const u8 *buf, int count)
@@ -223,7 +235,8 @@ void util_hex_dump_asc(FILE *f, const u8 *in, size_t count, int addr)
 	}
 }
 
-void util_print_usage_and_die(const char *app_name, const struct option options[],
+NORETURN void
+util_print_usage_and_die(const char *app_name, const struct option options[],
 	const char *option_help[], const char *args)
 {
 	int i;
@@ -275,7 +288,7 @@ void util_print_usage_and_die(const char *app_name, const struct option options[
 
 const char * util_acl_to_str(const sc_acl_entry_t *e)
 {
-	static char line[80], buf[10];
+	static char line[80], buf[20];
 	unsigned int acl;
 
 	if (e == NULL)
@@ -307,6 +320,21 @@ const char * util_acl_to_str(const sc_acl_entry_t *e)
 			if (e->key_ref != SC_AC_KEY_REF_NONE)
 				sprintf(buf + 4, "%d", e->key_ref);
 			break;
+		case SC_AC_SEN:
+			strcpy(buf, "Sec.Env. ");
+			if (e->key_ref != SC_AC_KEY_REF_NONE)
+				sprintf(buf + 3, "#%d", e->key_ref);
+			break;
+		case SC_AC_SCB:
+			strcpy(buf, "Sec.ControlByte ");
+			if (e->key_ref != SC_AC_KEY_REF_NONE)
+				sprintf(buf + 3, "Ox%X", e->key_ref);
+			break;
+		case SC_AC_IDA:
+			strcpy(buf, "PKCS#15 AuthID ");
+			if (e->key_ref != SC_AC_KEY_REF_NONE)
+				sprintf(buf + 3, "#%d", e->key_ref);
+			break;
 		default:
 			strcpy(buf, "????");
 			break;
@@ -319,7 +347,7 @@ const char * util_acl_to_str(const sc_acl_entry_t *e)
 	return line;
 }
 
-void
+NORETURN void
 util_fatal(const char *fmt, ...)
 {
 	va_list	ap;
@@ -329,6 +357,9 @@ util_fatal(const char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	fprintf(stderr, "\nAborting.\n");
 	va_end(ap);
+
+	sc_notify_close();
+
 	exit(1);
 }
 
@@ -361,7 +392,8 @@ util_getpass (char **lineptr, size_t *len, FILE *stream)
 {
 #define MAX_PASS_SIZE	128
 	char *buf;
-	unsigned int i;
+	size_t i;
+	int ch = 0;
 #ifndef _WIN32
 	struct termios old, new;
 
@@ -380,25 +412,25 @@ util_getpass (char **lineptr, size_t *len, FILE *stream)
 
 	for (i = 0; i < MAX_PASS_SIZE - 1; i++) {
 #ifndef _WIN32
-		buf[i] = getchar();
+		ch = getchar();
 #else
-		buf[i] = _getch();
+		ch = _getch();
 #endif
-		if (buf[i] == 0 || buf[i] == 3)
+		if (ch == 0 || ch == 3)
 			break;
-		if (buf[i] == '\n' || buf[i] == '\r')
+		if (ch == '\n' || ch == '\r')
 			break;
+
+		buf[i] = (char) ch;
 	}
 #ifndef _WIN32
 	tcsetattr (fileno (stdout), TCSAFLUSH, &old);
 	fputs("\n", stdout);
 #endif
-	if (buf[i] == 0 || buf[i] == 3) {
+	if (ch == 0 || ch == 3) {
 		free(buf);
 		return -1;
 	}
-
-	buf[i] = 0;
 
 	if (*lineptr && (!len || *len < i+1)) {
 		free(*lineptr);
@@ -417,3 +449,20 @@ util_getpass (char **lineptr, size_t *len, FILE *stream)
 	return i;
 }
 
+size_t
+util_get_pin(const char *input, const char **pin)
+{
+	size_t inputlen = strlen(input);
+	size_t pinlen = 0;
+
+	if(inputlen > 4 && strncasecmp(input, "env:", 4) == 0) {
+		// Get a PIN from a environment variable
+		*pin = getenv(input + 4);
+		pinlen = *pin ? strlen(*pin) : 0;
+	} else {
+		//Just use the input
+		*pin = input;
+		pinlen = inputlen;
+	}
+	return pinlen;
+}

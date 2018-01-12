@@ -13,6 +13,7 @@
 #include <unistd.h>
 #endif
 
+#include "libopensc/internal.h"
 #include "libopensc/opensc.h"
 #include "libopensc/pkcs15.h"
 #include "common/compat_getpass.h"
@@ -36,7 +37,15 @@ static int enum_pins(struct sc_pkcs15_object ***ret)
 		return 0;
 	}
 	objs = calloc(n, sizeof(*objs));
-	sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, n);
+	if (!objs) {
+		fprintf(stderr, "Not enough memory!\n");
+		return 1;
+	}
+	if (0 > sc_pkcs15_get_objects(p15card, SC_PKCS15_TYPE_AUTH_PIN, objs, n)) {
+		fprintf(stderr, "Error enumerating PIN codes\n");
+		free(objs);
+		return 1;
+	}
 	for (i = 0; i < n; i++) {
 		sc_test_print_object(objs[i]);
 	}
@@ -48,20 +57,23 @@ static int ask_and_verify_pin(struct sc_pkcs15_object *pin_obj)
 {
 	struct sc_pkcs15_auth_info *pin_info = (struct sc_pkcs15_auth_info *) pin_obj->data;
 	int i = 0;
-	char prompt[80];
+	char prompt[(sizeof pin_obj->label) + 30];
 	u8 *pass;
 
 	if (pin_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_UNBLOCKING_PIN) {
-		printf("Skipping unblocking pin [%s]\n", pin_obj->label);
+		printf("Skipping unblocking pin [%.*s]\n", (int) sizeof pin_obj->label, pin_obj->label);
 		return 0;
 	}
 
-	sprintf(prompt, "Please enter PIN code [%s]: ", pin_obj->label);
+	snprintf(prompt, sizeof(prompt), "Please enter PIN code [%.*s]: ",
+		(int) sizeof pin_obj->label, pin_obj->label);
 	pass = (u8 *) getpass(prompt);
 
-	sc_lock(card);
+	if (SC_SUCCESS != sc_lock(card))
+		return 1;
 	i = sc_pkcs15_verify_pin(p15card, pin_obj, pass, strlen((char *) pass));
-	sc_unlock(card);
+	if (SC_SUCCESS != sc_unlock(card))
+		return 1;
 	if (i) {
 		if (i == SC_ERROR_PIN_CODE_INCORRECT)
 			fprintf(stderr,
@@ -90,9 +102,11 @@ int main(int argc, char *argv[])
 		printf("Slot is capable of doing pinpad operations!\n");
 	printf("Looking for a PKCS#15 compatible Smart Card... ");
 	fflush(stdout);
-	sc_lock(card);
+	if (SC_SUCCESS != sc_lock(card))
+		return 1;
 	i = sc_pkcs15_bind(card, NULL, &p15card);
-	sc_unlock(card);
+	if (SC_SUCCESS != sc_unlock(card))
+		return 1;
 	if (i) {
 		fprintf(stderr, "failed: %s\n", sc_strerror(i));
 		sc_test_cleanup();
@@ -100,9 +114,11 @@ int main(int argc, char *argv[])
 	}
 	printf("found.\n");
 	printf("Enumerating PIN codes...\n");
-	sc_lock(card);
+	if (SC_SUCCESS != sc_lock(card))
+		return 1;
 	count = enum_pins(&objs);
-	sc_unlock(card);
+	if (SC_SUCCESS != sc_unlock(card))
+		return 1;
 	if (count < 0) {
 		sc_pkcs15_unbind(p15card);
 		sc_test_cleanup();

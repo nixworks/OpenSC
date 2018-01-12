@@ -52,15 +52,61 @@ enum {
 #define sc_log _sc_log
 #endif
 
-void sc_do_log(struct sc_context *ctx, int level, const char *file, int line, const char *func, 
+#if defined(__GNUC__)
+#if defined(__MINGW32__) && defined (__MINGW_PRINTF_FORMAT)
+#define SC_PRINTF_FORMAT __MINGW_PRINTF_FORMAT
+#else
+#define SC_PRINTF_FORMAT printf
+#endif
+
+/* GCC can check format and param correctness for us */
+void sc_do_log(struct sc_context *ctx, int level, const char *file, int line,
+	       const char *func, const char *format, ...)
+	__attribute__ ((format (SC_PRINTF_FORMAT, 6, 7)));
+void sc_do_log_noframe(sc_context_t *ctx, int level, const char *format,
+		       va_list args) __attribute__ ((format (SC_PRINTF_FORMAT, 3, 0)));
+void _sc_debug(struct sc_context *ctx, int level, const char *format, ...)
+	__attribute__ ((format (SC_PRINTF_FORMAT, 3, 4)));
+void _sc_log(struct sc_context *ctx, const char *format, ...)
+	__attribute__ ((format (SC_PRINTF_FORMAT, 2, 3)));
+#else
+void sc_do_log(struct sc_context *ctx, int level, const char *file, int line, const char *func,
 		const char *format, ...);
 void sc_do_log_noframe(sc_context_t *ctx, int level, const char *format, va_list args);
 void _sc_debug(struct sc_context *ctx, int level, const char *format, ...);
 void _sc_log(struct sc_context *ctx, const char *format, ...);
+#endif
+/** 
+ * @brief Log binary data to a sc context
+ * 
+ * @param[in] ctx   Context for logging
+ * @param[in] level
+ * @param[in] label Label to prepend to the buffer
+ * @param[in] data  Binary data
+ * @param[in] len   Length of \a data
+ */
+#define sc_debug_hex(ctx, level, label, data, len) \
+    _sc_debug_hex(ctx, level, __FILE__, __LINE__, __FUNCTION__, label, data, len)
+#define sc_log_hex(ctx, label, data, len) \
+    sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, label, data, len)
+/** 
+ * @brief Log binary data
+ *
+ * @param[in] ctx   Context for logging
+ * @param[in] type  Debug level
+ * @param[in] file  File name to be prepended
+ * @param[in] line  Line to be prepended
+ * @param[in] func  Function to be prepended
+ * @param[in] label label to prepend to the buffer
+ * @param[in] data  binary data
+ * @param[in] len   length of \a data
+ */
+void _sc_debug_hex(struct sc_context *ctx, int level, const char *file, int line,
+        const char *func, const char *label, const u8 *data, size_t len);
 
-void sc_hex_dump(struct sc_context *ctx, int level, const u8 * buf, size_t len, char *out, size_t outlen);
-char * sc_dump_hex(const u8 * in, size_t count);
-
+void sc_hex_dump(const u8 *buf, size_t len, char *out, size_t outlen);
+const char * sc_dump_hex(const u8 * in, size_t count);
+const char * sc_dump_oid(const struct sc_object_id *oid);
 #define SC_FUNC_CALLED(ctx, level) do { \
 	 sc_do_log(ctx, level, __FILE__, __LINE__, __FUNCTION__, "called\n"); \
 } while (0)
@@ -88,6 +134,16 @@ char * sc_dump_hex(const u8 * in, size_t count);
 	} \
 } while(0)
 #define LOG_TEST_RET(ctx, r, text) SC_TEST_RET((ctx), SC_LOG_DEBUG_NORMAL, (r), (text))
+
+#define SC_TEST_GOTO_ERR(ctx, level, r, text) do { \
+	int _ret = (r); \
+	if (_ret < 0) { \
+		sc_do_log(ctx, level, __FILE__, __LINE__, __FUNCTION__, \
+			"%s: %d (%s)\n", (text), _ret, sc_strerror(_ret)); \
+		goto err; \
+	} \
+} while(0)
+#define LOG_TEST_GOTO_ERR(ctx, r, text) SC_TEST_GOTO_ERR((ctx), SC_LOG_DEBUG_NORMAL, (r), (text))
 
 #ifdef __cplusplus
 }

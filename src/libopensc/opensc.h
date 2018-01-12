@@ -44,6 +44,14 @@ extern "C" {
 #include "libopensc/sm.h"
 #endif
 
+#if defined(_WIN32) && !(defined(__MINGW32__) && defined (__MINGW_PRINTF_FORMAT))
+#define SC_FORMAT_LEN_SIZE_T "I"
+#define SC_FORMAT_LEN_PTRDIFF_T "I"
+#else
+/* hope SUSv3 ones work */
+#define SC_FORMAT_LEN_SIZE_T "z"
+#define SC_FORMAT_LEN_PTRDIFF_T "t"
+#endif
 
 #define SC_SEC_OPERATION_DECIPHER	0x0001
 #define SC_SEC_OPERATION_SIGN		0x0002
@@ -68,6 +76,7 @@ extern "C" {
 #define SC_ALGORITHM_DES		64
 #define SC_ALGORITHM_3DES		65
 #define SC_ALGORITHM_GOST		66
+#define SC_ALGORITHM_AES		67
 
 /* Hash algorithms */
 #define SC_ALGORITHM_MD5		128
@@ -154,6 +163,7 @@ extern "C" {
 struct sc_supported_algo_info {
 	unsigned int reference;
 	unsigned int mechanism;
+	struct sc_object_id *parameters; /* OID for ECC, NULL for RSA */
 	unsigned int operations;
 	struct sc_object_id algo_id;
 	unsigned int algo_ref;
@@ -191,10 +201,23 @@ struct sc_pbes2_params {
 	struct sc_algorithm_id key_encr_alg;
 };
 
-struct sc_ec_params {
+/*
+ * The ecParameters can be presented as
+ * - name of curve;
+ * - OID of named curve;
+ * - implicit parameters.
+ *
+ * type - type(choice) of 'EC domain parameters' as it present in CKA_EC_PARAMS (PKCS#11).
+          Recommended value '1' -- namedCurve.
+ * field_length - EC key size in bits.
+ */
+struct sc_ec_parameters {
+	char *named_curve;
+	struct sc_object_id id;
+	struct sc_lv_data der;
+
 	int type;
-	u8 * der;
-	size_t der_len;
+	size_t field_length;
 };
 
 typedef struct sc_algorithm_info {
@@ -208,6 +231,7 @@ typedef struct sc_algorithm_info {
 		} _rsa;
 		struct sc_ec_info {
 			unsigned ext_flags;
+			struct sc_ec_parameters params;
 		} _ec;
 	} u;
 } sc_algorithm_info_t;
@@ -228,6 +252,8 @@ struct sc_ef_atr {
 	unsigned char df_selection;
 	size_t unit_size;
 	unsigned char card_capabilities;
+	size_t max_command_apdu;
+	size_t max_response_apdu;
 
 	struct sc_aid aid;
 
@@ -261,8 +287,6 @@ struct sc_reader_driver {
 	const char *short_name;
 	struct sc_reader_operations *ops;
 
-	size_t max_send_size; /* Max Lc supported by the reader layer */
-	size_t max_recv_size; /* Mac Le supported by the reader layer */
 	void *dll;
 };
 
@@ -272,14 +296,20 @@ struct sc_reader_driver {
 #define SC_READER_CARD_INUSE		0x00000004
 #define SC_READER_CARD_EXCLUSIVE	0x00000008
 #define SC_READER_HAS_WAITING_AREA	0x00000010
+#define SC_READER_REMOVED			0x00000020
+#define SC_READER_ENABLE_ESCAPE		0x00000040
 
 /* reader capabilities */
 #define SC_READER_CAP_DISPLAY	0x00000001
 #define SC_READER_CAP_PIN_PAD	0x00000002
-#define SC_READER_CAP_PACE_GENERIC         0x00000003
 #define SC_READER_CAP_PACE_EID             0x00000004
 #define SC_READER_CAP_PACE_ESIGN           0x00000008
 #define SC_READER_CAP_PACE_DESTROY_CHANNEL 0x00000010
+#define SC_READER_CAP_PACE_GENERIC         0x00000020
+
+/* reader send/receive length of short APDU */
+#define SC_READER_SHORT_APDU_MAX_SEND_SIZE 255
+#define SC_READER_SHORT_APDU_MAX_RECV_SIZE 256
 
 typedef struct sc_reader {
 	struct sc_context *ctx;
@@ -287,11 +317,17 @@ typedef struct sc_reader {
 	const struct sc_reader_operations *ops;
 	void *drv_data;
 	char *name;
+	char *vendor;
+	unsigned char version_major;
+	unsigned char version_minor;
 
 	unsigned long flags, capabilities;
 	unsigned int supported_protocols, active_protocol;
+	size_t max_send_size; /* Max Lc supported by the reader layer */
+	size_t max_recv_size; /* Mac Le supported by the reader layer */
 
 	struct sc_atr atr;
+	struct sc_uid uid;
 	struct _atr_info {
 		u8 *hist_bytes;
 		size_t hist_bytes_len;
@@ -308,31 +344,42 @@ typedef struct sc_reader {
 #define SC_PIN_CMD_CHANGE	1
 #define SC_PIN_CMD_UNBLOCK	2
 #define SC_PIN_CMD_GET_INFO	3
+#define SC_PIN_CMD_GET_SESSION_PIN	4
 
 #define SC_PIN_CMD_USE_PINPAD		0x0001
-#define SC_PIN_CMD_NEED_PADDING 	0x0002
+#define SC_PIN_CMD_NEED_PADDING		0x0002
 #define SC_PIN_CMD_IMPLICIT_CHANGE	0x0004
 
 #define SC_PIN_ENCODING_ASCII	0
 #define SC_PIN_ENCODING_BCD	1
 #define SC_PIN_ENCODING_GLP	2 /* Global Platform - Card Specification v2.0.1 */
 
+/** Values for sc_pin_cmd_pin.logged_in */
+#define SC_PIN_STATE_UNKNOWN	-1
+#define SC_PIN_STATE_LOGGED_OUT 0
+#define SC_PIN_STATE_LOGGED_IN  1
+
 struct sc_pin_cmd_pin {
 	const char *prompt;	/* Prompt to display */
 
-	const u8 *data;		/* PIN, if given by the appliction */
+	const unsigned char *data;		/* PIN, if given by the appliction */
 	int len;		/* set to -1 to get pin from pin pad */
 
-	size_t min_length;	/* min/max length of PIN */
-	size_t max_length;
+	size_t min_length;	/* min length of PIN */
+	size_t max_length;	/* max length of PIN */
+	size_t stored_length;	/* stored length of PIN */
+
 	unsigned int encoding;	/* ASCII-numeric, BCD, etc */
+
 	size_t pad_length;	/* filled in by the card driver */
-	u8 pad_char;
+	unsigned char pad_char;
+
 	size_t offset;		/* PIN offset in the APDU */
 	size_t length_offset;	/* Effective PIN length offset in the APDU */
 
 	int max_tries;	/* Used for signaling back from SC_PIN_CMD_GET_INFO */
 	int tries_left;	/* Used for signaling back from SC_PIN_CMD_GET_INFO */
+	int logged_in;	/* Used for signaling back from SC_PIN_CMD_GET_INFO */
 
 	struct sc_acl_entry acls[SC_MAX_SDO_ACLS];
 };
@@ -348,73 +395,6 @@ struct sc_pin_cmd_data {
 
 	struct sc_apdu *apdu;		/* APDU of the PIN command */
 };
-
-#if 0
-#define PACE_PIN_ID_MRZ 0x01
-#define PACE_PIN_ID_CAN 0x02
-#define PACE_PIN_ID_PIN 0x03
-#define PACE_PIN_ID_PUK 0x04
-/** 
- * Input data for EstablishPACEChannel()
- */
-struct establish_pace_channel_input {
-    /** Type of secret (CAN, MRZ, PIN or PUK). */
-    unsigned char pin_id;
-
-    /** Length of \a chat */
-    size_t chat_length;
-    /** Card holder authorization template */
-    const unsigned char *chat;
-
-    /** Length of \a pin */
-    size_t pin_length;
-    /** Secret */
-    const unsigned char *pin;
-
-    /** Length of \a certificate_description */
-    size_t certificate_description_length;
-    /** Certificate description */
-    const unsigned char *certificate_description;
-};
-
-/** 
- * Output data for EstablishPACEChannel()
- */
-struct establish_pace_channel_output {
-    /** PACE result (TR-03119) */
-    unsigned int result;
-
-    /** MSE: Set AT status byte */
-    unsigned char mse_set_at_sw1;
-    /** MSE: Set AT status byte */
-    unsigned char mse_set_at_sw2;
-
-    /** Length of \a ef_cardaccess */
-    size_t ef_cardaccess_length;
-    /** EF.CardAccess */
-    unsigned char *ef_cardaccess;
-
-    /** Length of \a recent_car */
-    size_t recent_car_length;
-    /** Most recent certificate authority reference */
-    unsigned char *recent_car;
-
-    /** Length of \a previous_car */
-    size_t previous_car_length;
-    /** Previous certificate authority reference */
-    unsigned char *previous_car;
-
-    /** Length of \a id_icc */
-    size_t id_icc_length;
-    /** ICC identifier */
-    unsigned char *id_icc;
-
-    /** Length of \a id_pcd */
-    size_t id_pcd_length;
-    /** PCD identifier */
-    unsigned char *id_pcd;
-};
-#endif
 
 struct sc_reader_operations {
 	/* Called during sc_establish_context(), when the driver
@@ -487,6 +467,9 @@ struct sc_reader_operations {
 /* Card has on-board random number source. */
 #define SC_CARD_CAP_RNG			0x00000004
 
+/* Card supports ISO7816 PIN status queries using an empty VERIFY */
+#define SC_CARD_CAP_ISO7816_PIN_INFO	0x00000008
+
 /* Use the card's ACs in sc_pkcs15init_authenticate(),
  * instead of relying on the ACL info in the profile files. */
 #define SC_CARD_CAP_USE_FCI_AC		0x00000010
@@ -495,11 +478,18 @@ struct sc_reader_operations {
 #define SC_CARD_CAP_ONLY_RAW_HASH		0x00000040
 #define SC_CARD_CAP_ONLY_RAW_HASH_STRIPPED	0x00000080
 
+/* Card (or card driver) supports an protected authentication mechanism */
+#define SC_CARD_CAP_PROTECTED_AUTHENTICATION_PATH	0x00000100
+
+/* Card (or card driver) supports generating a session PIN */
+#define SC_CARD_CAP_SESSION_PIN	0x00000200
+
 typedef struct sc_card {
 	struct sc_context *ctx;
 	struct sc_reader *reader;
 
 	struct sc_atr atr;
+	struct sc_uid uid;
 
 	int type;			/* Card type, for card driver internal use */
 	unsigned long caps, flags;
@@ -656,6 +646,8 @@ struct sc_card_operations {
 	int (*read_public_key)(struct sc_card *, unsigned,
 			struct sc_path *, unsigned, unsigned,
 			unsigned char **, size_t *);
+
+	int (*card_reader_lock_obtained)(struct sc_card *, int was_reset);
 };
 
 typedef struct sc_card_driver {
@@ -687,12 +679,27 @@ typedef struct {
 	unsigned long (*thread_id)(void);
 } sc_thread_context_t;
 
+/** Stop modifing or using external resources
+ *
+ * Currently this is used to avoid freeing duplicated external resources for a
+ * process that has been forked. For example, a child process may want to leave
+ * the duplicated card handles for the parent process. With this flag the child
+ * process indicates that shall the reader shall ignore those resources when
+ * calling sc_disconnect_card.
+ */
+#define SC_CTX_FLAG_TERMINATE				0x00000001
+#define SC_CTX_FLAG_PARANOID_MEMORY			0x00000002
+#define SC_CTX_FLAG_DEBUG_MEMORY			0x00000004
+#define SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER	0x00000008
+#define SC_CTX_FLAG_DISABLE_POPUPS			0x00000010
+
 typedef struct sc_context {
 	scconf_context *conf;
 	scconf_block *conf_blocks[3];
 	char *app_name;
 	int debug;
-	int paranoid_memory;
+	int reopen_log_file;
+	unsigned long flags;
 
 	FILE *debug_file;
 	char *debug_filename;
@@ -725,9 +732,6 @@ void sc_format_apdu(struct sc_card *, struct sc_apdu *, int, int, int, int);
 
 int sc_check_apdu(struct sc_card *, const struct sc_apdu *);
 
-struct sc_apdu *sc_allocate_apdu(struct sc_apdu *,  unsigned);
-void sc_free_apdu(struct sc_apdu *);
-
 /** Transforms an APDU from binary to its @c sc_apdu_t representation
  *  @param  ctx     sc_context_t object (used for logging)
  *  @param  buf     APDU to be encoded as an @c sc_apdu_t object
@@ -741,6 +745,24 @@ void sc_free_apdu(struct sc_apdu *);
  *  0. You should modify both if you are expecting data in the response APDU.
  */
 int sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu);
+
+/** Encodes a APDU as an octet string
+ *  @param  ctx     sc_context_t object (used for logging)
+ *  @param  apdu    APDU to be encoded as an octet string
+ *  @param  proto   protocol version to be used
+ *  @param  out     output buffer of size outlen.
+ *  @param  outlen  size of hte output buffer
+ *  @return SC_SUCCESS on success and an error code otherwise
+ */
+int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
+	unsigned int proto, u8 *out, size_t outlen);
+
+/** Calculates the length of the encoded APDU in octets.
+ *  @param  apdu   the APDU
+ *  @param  proto  the desired protocol
+ *  @return length of the encoded APDU
+ */
+size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto);
 
 int sc_check_sw(struct sc_card *card, unsigned int sw1, unsigned int sw2);
 
@@ -769,7 +791,7 @@ typedef struct {
 	 *  dependend configuration data). If NULL the name "default"
 	 *  will be used. */
 	const char    *app_name;
-	/** flags, currently unused */
+	/** context flags */
 	unsigned long flags;
 	/** mutex functions to use (optional) */
 	sc_thread_context_t *thread_ctx;
@@ -809,6 +831,16 @@ int sc_release_context(sc_context_t *ctx);
 int sc_ctx_detect_readers(sc_context_t *ctx);
 
 /**
+ * In windows: get configuration option from environment or from registers.
+ * @param env name of environment variable
+ * @param reg name of register value
+ * @param key path of register key
+ * @return SC_SUCCESS on success and an error code otherwise.
+ */
+int sc_ctx_win32_get_config_value(char *env, char *reg, char *key, char *out,
+	size_t *out_size);
+
+/**
  * Returns a pointer to the specified sc_reader_t object
  * @param  ctx  OpenSC context
  * @param  i    number of the reader structure to return (starting with 0)
@@ -823,12 +855,12 @@ sc_reader_t *sc_ctx_get_reader(sc_context_t *ctx, unsigned int i);
  *
  * @param  ctx   pointer to a sc_context_t
  * @param  pcsc_context_handle pointer to the  new context_handle to use
- * @param  pcsc_card_handle pointer to the new card_handle to use 
+ * @param  pcsc_card_handle pointer to the new card_handle to use
  * @return SC_SUCCESS on success and an error code otherwise.
  */
 int sc_ctx_use_reader(sc_context_t *ctx, void * pcsc_context_handle, void * pcsc_card_handle);
 
-/** 
+/**
  * Returns a pointer to the specified sc_reader_t object
  * @param  ctx  OpenSC context
  * @param  name name of the reader to look for
@@ -837,7 +869,7 @@ int sc_ctx_use_reader(sc_context_t *ctx, void * pcsc_context_handle, void * pcsc
  */
 sc_reader_t *sc_ctx_get_reader_by_name(sc_context_t *ctx, const char *name);
 
-/** 
+/**
  * Returns a pointer to the specified sc_reader_t object
  * @param  ctx  OpenSC context
  * @param  id id of the reader (starting from 0)
@@ -852,6 +884,8 @@ sc_reader_t *sc_ctx_get_reader_by_id(sc_context_t *ctx, unsigned int id);
  * @return the number of available reader objects
  */
 unsigned int sc_ctx_get_reader_count(sc_context_t *ctx);
+
+int _sc_delete_reader(sc_context_t *ctx, sc_reader_t *reader);
 
 /**
  * Redirects OpenSC debug log to the specified file
@@ -913,7 +947,7 @@ int sc_detect_card_presence(sc_reader_t *reader);
  * @retval = 1 if the timeout occured
  */
 int sc_wait_for_event(sc_context_t *ctx, unsigned int event_mask,
-                      sc_reader_t **event_reader, unsigned int *event, 
+                      sc_reader_t **event_reader, unsigned int *event,
 		      int timeout, void **reader_states);
 
 /**
@@ -945,6 +979,30 @@ int sc_lock(struct sc_card *card);
  * @retval SC_SUCCESS on success
  */
 int sc_unlock(struct sc_card *card);
+
+/**
+ * @brief Calculate the maximum size of R-APDU payload (Ne).
+ *
+ * Takes card limitations into account such as extended length support as well
+ * as the reader's limitation for data transfer.
+ *
+ * @param card Initialized card object with its reader
+ *
+ * @return maximum Ne
+ */
+size_t sc_get_max_recv_size(const sc_card_t *card);
+
+/**
+ * @brief Calculate the maximum size of C-APDU payload (Nc).
+ *
+ * Takes card limitations into account such as extended length support as well
+ * as the reader's limitation for data transfer.
+ *
+ * @param card
+ *
+ * @return maximum Nc
+ */
+size_t sc_get_max_send_size(const sc_card_t *card);
 
 
 /********************************************************************/
@@ -982,8 +1040,8 @@ int sc_read_binary(struct sc_card *card, unsigned int idx, u8 * buf,
 		   size_t count, unsigned long flags);
 /**
  * Write data to a binary EF
- * @param  card   struct sc_card object on which to issue the command 
- * @param  idx    index within the file for the data to be written 
+ * @param  card   struct sc_card object on which to issue the command
+ * @param  idx    index within the file for the data to be written
  * @param  buf    buffer with the data
  * @param  count  number of bytes to write
  * @param  flags  flags for the WRITE BINARY command (currently not used)
@@ -1141,6 +1199,8 @@ int sc_file_set_prop_attr(sc_file_t *file, const u8 *prop_attr,
 			  size_t prop_attr_len);
 int sc_file_set_type_attr(sc_file_t *file, const u8 *type_attr,
 			  size_t type_attr_len);
+int sc_file_set_content(sc_file_t *file, const u8 *content,
+			  size_t content_len);
 
 
 /********************************************************************/
@@ -1151,8 +1211,8 @@ int sc_file_set_type_attr(sc_file_t *file, const u8 *type_attr,
  * Sets the content of a sc_path_t object.
  * @param  path    sc_path_t object to set
  * @param  type    type of path
- * @param  id      value of the path 
- * @param  id_len  length of the path value 
+ * @param  id      value of the path
+ * @param  id_len  length of the path value
  * @param  index   index within the file
  * @param  count   number of bytes
  * @return SC_SUCCESS on success and an error code otherwise
@@ -1163,7 +1223,7 @@ int sc_path_set(sc_path_t *path, int type, const u8 *id, size_t id_len,
 void sc_format_path(const char *path_in, sc_path_t *path_out);
 /**
  * Return string representation of the given sc_path_t object
- * Warning: as static memory is used for the return value 
+ * Warning: as static memory is used for the return value
  *          this function is not thread-safe !!!
  * @param  path  sc_path_t object of the path to be printed
  * @return pointer to a const buffer with the string representation
@@ -1179,7 +1239,7 @@ const char *sc_print_path(const sc_path_t *path);
  */
 int sc_path_print(char *buf, size_t buflen, const sc_path_t *path);
 /**
- * Compares two sc_path_t objects 
+ * Compares two sc_path_t objects
  * @param  patha  sc_path_t object of the first path
  * @param  pathb  sc_path_t object of the second path
  * @return 1 if both paths are equal and 0 otherwise
@@ -1203,7 +1263,7 @@ int sc_concatenate_path(sc_path_t *d, const sc_path_t *p1, const sc_path_t *p2);
  */
 int sc_append_path(sc_path_t *dest, const sc_path_t *src);
 /**
- * Checks whether one path is a prefix of another path 
+ * Checks whether one path is a prefix of another path
  * @param  prefix  sc_path_t object with the prefix
  * @param  path    sc_path_t object with the path which should start
  *                 with the given prefix
@@ -1224,6 +1284,7 @@ const sc_path_t *sc_get_mf_path(void);
 
 int sc_hex_to_bin(const char *in, u8 *out, size_t *outlen);
 int sc_bin_to_hex(const u8 *, size_t, char *, size_t, int separator);
+size_t sc_right_trim(u8 *buf, size_t len);
 scconf_block *sc_get_conf_block(sc_context_t *ctx, const char *name1, const char *name2, int priority);
 
 /**
@@ -1242,7 +1303,7 @@ int sc_format_oid(struct sc_object_id *oid, const char *in);
  * Compares two sc_object_id objects
  * @param  oid1  the first sc_object_id object
  * @param  oid2  the second sc_object_id object
- * @return 1 if the oids are equal and a non-zero value otherwise
+ * @return 1 if the oids are equal and a zero value otherwise
  */
 int sc_compare_oid(const struct sc_object_id *oid1, const struct sc_object_id *oid2);
 /**
@@ -1274,6 +1335,9 @@ struct sc_app_info *sc_find_app(struct sc_card *card, struct sc_aid *aid);
 void sc_free_apps(struct sc_card *card);
 int sc_parse_ef_atr(struct sc_card *card);
 void sc_free_ef_atr(struct sc_card *card);
+int sc_parse_ef_gdo(struct sc_card *card,
+	   	const unsigned char **iccsn, size_t *iccsn_len,
+		const unsigned char **chn, size_t *chn_len);
 int sc_update_dir(struct sc_card *card, sc_app_info_t *app);
 
 void sc_print_cache(struct sc_card *card);
@@ -1281,16 +1345,17 @@ void sc_print_cache(struct sc_card *card);
 struct sc_algorithm_info * sc_card_find_rsa_alg(struct sc_card *card,
 		unsigned int key_length);
 struct sc_algorithm_info * sc_card_find_ec_alg(struct sc_card *card,
-		unsigned int field_length);
+		unsigned int field_length, struct sc_object_id *curve_oid);
 struct sc_algorithm_info * sc_card_find_gostr3410_alg(struct sc_card *card,
 		unsigned int key_length);
 
+scconf_block *sc_match_atr_block(sc_context_t *ctx, struct sc_card_driver *driver, struct sc_atr *atr);
 /**
  * Get CRC-32 digest
  * @param value pointer to data used for CRC calculation
  * @param len length of data used for CRC calculation
  */
-unsigned sc_crc32(unsigned char *value, size_t len);
+unsigned sc_crc32(const unsigned char *value, size_t len);
 
 /**
  * Used to initialize the @c sc_remote_data structure --
@@ -1298,6 +1363,15 @@ unsigned sc_crc32(unsigned char *value, size_t len);
  * to manipulate the list.
  */
 void sc_remote_data_init(struct sc_remote_data *rdata);
+
+
+/**
+ * Copy and allocate if needed EC parameters data
+ * @dst destination
+ * @src source
+ */
+int sc_copy_ec_params(struct sc_ec_parameters *, struct sc_ec_parameters *);
+
 
 struct sc_card_error {
 	unsigned int SWs;
@@ -1315,6 +1389,34 @@ extern const char *sc_get_version(void);
 	}
 
 extern sc_card_driver_t *sc_get_iso7816_driver(void);
+
+/** 
+ * @brief Read a complete EF by short file identifier.
+ *
+ * @param[in]     card
+ * @param[in]     sfid   Short file identifier
+ * @param[in,out] ef     Where to safe the file. the buffer will be allocated
+ *                       using \c realloc() and should be set to NULL, if
+ *                       empty.
+ * @param[in,out] ef_len Length of \a *ef
+ *
+ * @note The appropriate directory must be selected before calling this function.
+ * */
+int iso7816_read_binary_sfid(sc_card_t *card, unsigned char sfid,
+		u8 **ef, size_t *ef_len);
+
+/**
+ * @brief Write a complete EF by short file identifier.
+ *
+ * @param[in] card
+ * @param[in] sfid   Short file identifier
+ * @param[in] ef     Date to write
+ * @param[in] ef_len Length of \a ef
+ *
+ * @note The appropriate directory must be selected before calling this function.
+ * */
+int iso7816_write_binary_sfid(sc_card_t *card, unsigned char sfid,
+		u8 *ef, size_t ef_len);
 
 #ifdef __cplusplus
 }

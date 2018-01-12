@@ -16,7 +16,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <ctype.h>
 #include <string.h>
@@ -317,76 +319,7 @@ static int asepcos_select_file(sc_card_t *card, const sc_path_t *in_path,
 static int asepcos_set_security_env(sc_card_t *card,
 	const sc_security_env_t *env, int se_num)
 {
-#if 0
-	/* this function doesn't seem to be necessary if RSA ENCRYPT DECRYPT
-	 * is used.  */
-
-	sc_apdu_t apdu;
-	u8 sbuf[SC_MAX_APDU_BUFFER_SIZE], *p = sbuf;
-	int r, locked = 0;
-
-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0, 0);
-	switch (env->operation) {
-	case SC_SEC_OPERATION_DECIPHER:
-		apdu.p1 = 0x41;
-		apdu.p2 = 0xB8;
-		break;
-	case SC_SEC_OPERATION_SIGN:
-		apdu.p1 = 0x41;
-		apdu.p2 = 0xB6;
-		break;
-	default:
-		return SC_ERROR_INVALID_ARGUMENTS;
-	}
-	if (env->flags & SC_SEC_ENV_ALG_REF_PRESENT) {
-		*p++ = 0x80;	/* algorithm reference */
-		*p++ = 0x01;
-		*p++ = env->algorithm_ref & 0xFF;
-	}
-	if (env->flags & SC_SEC_ENV_FILE_REF_PRESENT) {
-		*p++ = 0x84;
-		*p++ = env->file_ref.len;
-		memcpy(p, env->file_ref.value, env->file_ref.len);
-		p += env->file_ref.len;
-	}
-
-	apdu.lc      = p - sbuf;
-	apdu.datalen = p - sbuf;
-	apdu.data    = sbuf;
-	if (se_num > 0) {
-		r = sc_lock(card);
-		SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "sc_lock() failed");
-		locked = 1;
-	}
-	if (apdu.datalen != 0) {
-		r = sc_transmit_apdu(card, &apdu);
-		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				"%s: APDU transmit failed", sc_strerror(r));
-			goto err;
-		}
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
-		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				 "%s: Card returned error", sc_strerror(r));
-			goto err;
-		}
-	}
-	if (se_num <= 0)
-		return 0;
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0xF2, se_num);
-	r = sc_transmit_apdu(card, &apdu);
-	sc_unlock(card);
-	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
-	return sc_check_sw(card, apdu.sw1, apdu.sw2);
-err:
-	if (locked)
-		sc_unlock(card);
-	return r;
-#else
 	return SC_SUCCESS;
-#endif
 }
 
 
@@ -731,7 +664,7 @@ static int asepcos_list_files(sc_card_t *card, u8 *buf, size_t blen)
 
 	/* 1. get currently selected DF */
 	r = asepcos_get_current_df_path(card, &bpath);
-	if (rv != SC_SUCCESS)
+	if (r != SC_SUCCESS)
 		return r;
 	/* 2. re-select DF to get the FID of the child EFs/DFs */
 	r = sc_select_file(card, &bpath, &tfile);
@@ -799,14 +732,6 @@ static int asepcos_delete_file(sc_card_t *card, const sc_path_t *path)
 	sc_apdu_t apdu;
 	u8        buf[SC_MAX_APDU_BUFFER_SIZE];
 
-#if 0
-	/* select the file (note: if the file is already selected we do
-	 * not re-select it as we might otherwise lose the necessary
-	 * credential */
-	r = sc_select_file(card, path, NULL);
-	if (r != SC_SUCCESS)
-		return r;
-#endif
 	/* use GET DATA to determine whether it is a DF or EF */
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0xca, 0x01, 0x84);
 	apdu.le      = 256;
@@ -945,13 +870,8 @@ static int asepcos_build_pin_apdu(sc_card_t *card, sc_apdu_t *apdu,
 		*p++ = (fileid >> 16) & 0xff;
 		*p++ = (fileid >> 8 ) & 0xff;
 		*p++ = fileid & 0xff;
-		if (is_puk == 0) {
-			memcpy(p, data->pin1.data, data->pin1.len);
-			p += data->pin1.len;
-		} else {
-			memcpy(p, data->pin1.data, data->pin1.len);
-			p += data->pin1.len;
-		}
+		memcpy(p, data->pin1.data, data->pin1.len);
+		p += data->pin1.len;
 		apdu->lc       = p - buf;
 		apdu->datalen  = p - buf;
 		apdu->data     = buf;
@@ -1051,7 +971,6 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 		}
 		if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00) {
 			/* unable to verify the old PIN */
-			r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 			break;
 		}
 		/* 2, step: use CHANGE KEY to update the PIN */
@@ -1061,7 +980,6 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 		r = sc_transmit_apdu(card, &apdu);
 		if (r != SC_SUCCESS)
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "APDU transmit failed");
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		break;
 	case SC_PIN_CMD_UNBLOCK:
 		if (pdata->pin_type != SC_AC_CHV)
@@ -1088,7 +1006,6 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "APDU transmit failed");
 			break;
 		}
-		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		break;
 	default:
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "error: unknow cmd type");
@@ -1097,12 +1014,16 @@ static int asepcos_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *pdata,
 	/* Clear the buffer - it may contain pins */
 	sc_mem_clear(sbuf, sizeof(sbuf));
 	/* check for remaining tries if verification failed */
-	if (apdu.sw1 == 0x63) {
-		if ((apdu.sw2 & 0xF0) == 0xC0 && tries_left != NULL)
-			*tries_left = apdu.sw2 & 0x0F;
-		return SC_ERROR_PIN_CODE_INCORRECT;
+	if (r == SC_SUCCESS) {
+		if (apdu.sw1 == 0x63) {
+			if ((apdu.sw2 & 0xF0) == 0xC0 && tries_left != NULL)
+				*tries_left = apdu.sw2 & 0x0F;
+			r = SC_ERROR_PIN_CODE_INCORRECT;
+		}
+		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	}
-	return sc_check_sw(card, apdu.sw1, apdu.sw2);
+
+	return r;
 }
 
 static struct sc_card_driver * sc_get_driver(void)

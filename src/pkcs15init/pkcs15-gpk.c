@@ -1,7 +1,7 @@
 /*
  * GPK specific operation for PKCS15 initialization
  *
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -458,8 +458,7 @@ gpk_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_pkcs15_objec
 #endif
 
 done:
-	if (keyfile)
-		sc_file_free(keyfile);
+	sc_file_free(keyfile);
 	return r;
 }
 
@@ -501,8 +500,7 @@ gpk_store_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	if (r >= 0)
 		r = gpk_store_pk(profile, p15card, keyfile, &data);
 
-	if (keyfile)
-		sc_file_free(keyfile);
+	sc_file_free(keyfile);
 	return r;
 }
 
@@ -520,8 +518,10 @@ gpk_generate_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	sc_file_t	*keyfile;
 	int             r, n;
 
-	sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "path=%s, %d bits\n", sc_print_path(&key_info->path),
-			key_info->modulus_length);
+	sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL,
+		 "path=%s, %"SC_FORMAT_LEN_SIZE_T"u bits\n",
+		 sc_print_path(&key_info->path),
+		 key_info->modulus_length);
 
 	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA) {
 		sc_debug(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, "GPK supports generating only RSA keys.");
@@ -596,8 +596,7 @@ gpk_pkfile_create(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file_t *f
 	if (r >= 0)
 		r = sc_pkcs15init_authenticate(profile, p15card, file,
 				SC_AC_OP_UPDATE);
-	if (found)
-		sc_file_free(found);
+	sc_file_free(found);
 
 	return r;
 }
@@ -718,7 +717,8 @@ gpk_pkfile_init_public(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file
 	if (r >= 0) {
 		if (r != 7 || buffer[0] != 0) {
 			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "first record of public key file is not Lsys0");
-			return SC_ERROR_OBJECT_NOT_VALID;
+			r = SC_ERROR_OBJECT_NOT_VALID;
+			goto out;
 		}
 
 		r = sc_update_record(p15card->card, 1, sysrec, sizeof(sysrec),
@@ -727,8 +727,7 @@ gpk_pkfile_init_public(sc_profile_t *profile, sc_pkcs15_card_t *p15card, sc_file
 		r = sc_append_record(p15card->card, sysrec, sizeof(sysrec), 0);
 	}
 
-out:	if (tmp)
-		sc_file_free(tmp);
+out:	sc_file_free(tmp);
 	return r;
 }
 

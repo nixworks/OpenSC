@@ -34,8 +34,10 @@
 #endif
 
 #include "common/compat_getpass.h"
+#include "libopensc/internal.h"
 #include "libopensc/opensc.h"
 #include "libopensc/pkcs15.h"
+#include "libopensc/asn1.h"
 #include "util.h"
 
 static const char *app_name = "pkcs15-crypt";
@@ -45,10 +47,11 @@ static char * opt_reader;
 static char * opt_pincode = NULL, * opt_key_id = NULL;
 static char * opt_input = NULL, * opt_output = NULL;
 static char * opt_bind_to_aid = NULL;
+static char * opt_sig_format = NULL;
 static int opt_crypt_flags = 0;
 
 enum {
-	OPT_SHA1 = 	0x100,
+	OPT_SHA1 =	0x100,
 	OPT_SHA256,
 	OPT_SHA384,
 	OPT_SHA512,
@@ -56,15 +59,18 @@ enum {
 	OPT_MD5,
 	OPT_PKCS1,
 	OPT_BIND_TO_AID,
+	OPT_VERSION,
 };
 
 static const struct option options[] = {
+	{ "version",		0, NULL,		OPT_VERSION },
 	{ "sign",		0, NULL,		's' },
 	{ "decipher",		0, NULL,		'c' },
 	{ "key",		1, NULL,		'k' },
 	{ "reader",		1, NULL,		'r' },
 	{ "input",		1, NULL,		'i' },
 	{ "output",		1, NULL,		'o' },
+	{ "signature-format",	1, NULL,		'f' },
 	{ "raw",		0, NULL,		'R' },
 	{ "sha-1",		0, NULL,		OPT_SHA1 },
 	{ "sha-256",		0, NULL,		OPT_SHA256 },
@@ -81,12 +87,14 @@ static const struct option options[] = {
 };
 
 static const char *option_help[] = {
+	"Print OpenSC package version",
 	"Performs digital signature operation",
 	"Decipher operation",
 	"Selects the private key ID to use",
 	"Uses reader number <arg>",
-	"Selects the input file to use",
-	"Outputs to file <arg>",
+	"Selects the input file to use (defaults to stdin)",
+	"Outputs to file <arg> (defaults to stdout)",
+	"Format for ECDSA signature <arg>: 'rs' (default), 'sequence', 'openssl'",
 	"Outputs raw 8 bit data",
 	"Input file is a SHA-1 hash",
 	"Input file is a SHA-256 hash",
@@ -122,7 +130,7 @@ static char *readpin_stdin(void)
 
 static char * get_pin(struct sc_pkcs15_object *obj)
 {
-	char buf[80];
+	char buf[(sizeof obj->label) + 20];
 	char *pincode;
 	struct sc_pkcs15_auth_info *pinfo = (struct sc_pkcs15_auth_info *) obj->data;
 
@@ -136,14 +144,15 @@ static char * get_pin(struct sc_pkcs15_object *obj)
 			return strdup(opt_pincode);
 	}
 
-	sprintf(buf, "Enter PIN [%s]: ", obj->label);
+	snprintf(buf, sizeof(buf), "Enter PIN [%.*s]: ",
+		(int) sizeof obj->label, obj->label);
 	while (1) {
 		pincode = getpass(buf);
 		if (strlen(pincode) == 0)
 			return NULL;
 		if (strlen(pincode) < pinfo->attrs.pin.min_length ||
-		    strlen(pincode) > pinfo->attrs.pin.max_length)
-		    	continue;
+				strlen(pincode) > pinfo->attrs.pin.max_length)
+			continue;
 		return strdup(pincode);
 	}
 }
@@ -153,13 +162,19 @@ static int read_input(u8 *buf, int buflen)
 	FILE *inf;
 	int c;
 
-	inf = fopen(opt_input, "rb");
-	if (inf == NULL) {
-		fprintf(stderr, "Unable to open '%s' for reading.\n", opt_input);
-		return -1;
+	if (opt_input==NULL) {
+		inf = stdin;
+	} else {
+		inf = fopen(opt_input, "rb");
+		if (inf == NULL) {
+			fprintf(stderr, "Unable to open '%s' for reading.\n", opt_input);
+			return -1;
+		}
 	}
 	c = fread(buf, 1, buflen, inf);
-	fclose(inf);
+	if (inf!=stdin) {
+		fclose(inf);
+	}
 	if (c < 0) {
 		perror("read");
 		return -1;
@@ -181,10 +196,12 @@ static int write_output(const u8 *buf, int len)
 	} else {
 		outf = stdout;
 	}
+
 	if (output_binary == 0)
 		util_print_binary(outf, buf, len);
 	else
 		fwrite(buf, len, 1, outf);
+
 	if (outf != stdout)
 		fclose(outf);
 	return 0;
@@ -197,8 +214,7 @@ static int sign(struct sc_pkcs15_object *obj)
 	int r, c, len;
 
 	if (opt_input == NULL) {
-		fprintf(stderr, "No input file specified.\n");
-		return 2;
+		fprintf(stderr, "No input file specified. Reading from stdin\n");
 	}
 
 	c = read_input(buf, sizeof(buf));
@@ -222,10 +238,28 @@ static int sign(struct sc_pkcs15_object *obj)
 		fprintf(stderr, "Compute signature failed: %s\n", sc_strerror(r));
 		return 1;
 	}
+	len = r;
 
-	r = write_output(out, r);
+	if (obj->type == SC_PKCS15_TYPE_PRKEY_EC)   {
+		if (opt_sig_format &&  (!strcmp(opt_sig_format, "openssl") || !strcmp(opt_sig_format, "sequence")))   {
+			unsigned char *seq;
+			size_t seqlen;
 
-	return 0;
+			if (sc_asn1_sig_value_rs_to_sequence(ctx, out, len, &seq, &seqlen))   {
+				fprintf(stderr, "Failed to convert signature to ASN1 sequence format.\n");
+				return 2;
+			}
+
+			memcpy(out, seq, seqlen);
+			len = seqlen;
+
+			free(seq);
+		}
+	}
+
+	r = write_output(out, len);
+
+	return r;
 }
 
 static int decipher(struct sc_pkcs15_object *obj)
@@ -234,8 +268,7 @@ static int decipher(struct sc_pkcs15_object *obj)
 	int r, c, len;
 
 	if (opt_input == NULL) {
-		fprintf(stderr, "No input file specified.\n");
-		return 2;
+		fprintf(stderr, "No input file specified. Reading from stdin\n");
 	}
 	c = read_input(buf, sizeof(buf));
 	if (c < 0)
@@ -254,7 +287,7 @@ static int decipher(struct sc_pkcs15_object *obj)
 	}
 	r = write_output(out, r);
 
-	return 0;
+	return r;
 }
 
 static int get_key(unsigned int usage, sc_pkcs15_object_t **result)
@@ -302,15 +335,17 @@ static int get_key(unsigned int usage, sc_pkcs15_object_t **result)
 
 		pincode = get_pin(pin);
 		if (((pincode == NULL || *pincode == '\0')) &&
-		    !(p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD))
-				return 5;
+		    !(p15card->card->reader->capabilities & SC_READER_CAP_PIN_PAD)) {
+			free(pincode);
+			return 5;
+		}
 
 		r = sc_pkcs15_verify_pin(p15card, pin, (const u8 *)pincode, pincode ? strlen(pincode) : 0);
+		free(pincode);
 		if (r) {
 			fprintf(stderr, "PIN code verification failed: %s\n", sc_strerror(r));
 			return 5;
 		}
-		free(pincode);
 		if (verbose)
 			fprintf(stderr, "PIN code correct.\n");
 		prev_pin = pin;
@@ -319,22 +354,27 @@ static int get_key(unsigned int usage, sc_pkcs15_object_t **result)
 	return 0;
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int do_decipher = 0;
 	int do_sign = 0;
+	int do_print_version = 0;
 	int action_count = 0;
-        struct sc_pkcs15_object *key;
+	struct sc_pkcs15_object *key;
 	sc_context_param_t ctx_param;
 
 	while (1) {
-		c = getopt_long(argc, argv, "sck:r:i:o:Rp:vw", options, &long_optind);
+		c = getopt_long(argc, argv, "sck:r:i:o:f:Rp:vw", options, &long_optind);
 		if (c == -1)
 			break;
 		if (c == '?')
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		switch (c) {
+		case OPT_VERSION:
+			do_print_version = 1;
+			action_count++;
+			break;
 		case 's':
 			do_sign++;
 			action_count++;
@@ -355,6 +395,9 @@ int main(int argc, char * const argv[])
 			break;
 		case 'o':
 			opt_output = optarg;
+			break;
+		case 'f':
+			opt_sig_format = optarg;
 			break;
 		case 'R':
 			opt_raw = 1;
@@ -396,6 +439,11 @@ int main(int argc, char * const argv[])
 	}
 	if (action_count == 0)
 		util_print_usage_and_die(app_name, options, option_help, NULL);
+
+	if (do_print_version)   {
+		printf("%s\n", OPENSC_SCM_REVISION);
+		action_count--;
+	}
 
 	if (!(opt_crypt_flags & SC_ALGORITHM_RSA_HASHES))
 		opt_crypt_flags |= SC_ALGORITHM_RSA_HASH_NONE;
@@ -444,7 +492,7 @@ int main(int argc, char * const argv[])
 		fprintf(stderr, "Found %s!\n", p15card->tokeninfo->label);
 
 	if (do_decipher) {
-		if ((err = get_key(SC_PKCS15_PRKEY_USAGE_DECRYPT, &key))
+		if ((err = get_key(SC_PKCS15_PRKEY_USAGE_DECRYPT|SC_PKCS15_PRKEY_USAGE_UNWRAP, &key))
 		 || (err = decipher(key)))
 			goto end;
 		action_count--;

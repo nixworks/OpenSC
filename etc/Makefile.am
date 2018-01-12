@@ -1,12 +1,14 @@
-MAINTAINERCLEANFILES = $(srcdir)/Makefile.in $(srcdir)/opensc.conf.win
-DISTCLEANFILES = opensc.conf opensc.conf.win
+CV_CERTS = DESRCACC100001
 
-EXTRA_DIST = Makefile.mak
+MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
+DISTCLEANFILES = opensc.conf
+
+EXTRA_DIST = $(CV_CERTS) Makefile.mak
 
 SUFFIXES = .in
 
-dist_noinst_DATA = opensc.conf.in opensc.conf.win.in
-nodist_noinst_DATA = opensc.conf opensc.conf.win # For Windows MSVC build
+dist_noinst_DATA = opensc.conf.in
+nodist_noinst_DATA = opensc.conf
 
 # Make sure we build this every time
 # as there is no dependency for this.
@@ -15,12 +17,17 @@ force:
 opensc.conf: opensc.conf.in force
 
 .in:
-	sed \
+	@sed \
 		-e 's|@pkgdatadir[@]|$(pkgdatadir)|g' \
-		-e 's|@libdir[@]|$(libdir)|g' \
+		-e 's|@DEBUG_FILE[@]|$(DEBUG_FILE)|g' \
 		-e 's|@DEFAULT_PCSC_PROVIDER[@]|$(DEFAULT_PCSC_PROVIDER)|g' \
 		-e 's|@DEFAULT_SM_MODULE[@]|$(DEFAULT_SM_MODULE)|g' \
-		-e 's|@DEBUG_FILE[@]|$(DEBUG_FILE)|g' \
+		-e 's|@DEFAULT_SM_MODULE_PATH[@]|$(DEFAULT_SM_MODULE_PATH)|g' \
+		-e 's|@DYN_LIB_EXT[@]|$(DYN_LIB_EXT)|g' \
+		-e 's|@LIBDIR[@]|$(LIBDIR)|g' \
+		-e 's|@LIB_PRE[@]|$(LIB_PRE)|g' \
+		-e 's|@PROFILE_DIR[@]|$(PROFILE_DIR)|g' \
+		-e 's|@PROFILE_DIR_DEFAULT[@]|$(PROFILE_DIR_DEFAULT)|g' \
 		< $< > $@
 
 install-exec-hook: opensc.conf
@@ -30,3 +37,15 @@ install-exec-hook: opensc.conf
 	else \
 		$(INSTALL_DATA) opensc.conf "$(DESTDIR)$(sysconfdir)/opensc.conf"; \
 	fi
+
+uninstall-hook: opensc.conf
+	rm -f "$(DESTDIR)$(sysconfdir)/opensc.conf.new" "$(DESTDIR)$(sysconfdir)/opensc.conf"
+
+if ENABLE_OPENPACE
+install-data-local:
+	$(MKDIR_P) "$(DESTDIR)$(CVCDIR)"
+	for cert in $(CV_CERTS);   do $(INSTALL_DATA) $(srcdir)/$${cert} "$(DESTDIR)$(CVCDIR)";  done
+
+uninstall-local:
+	for cert in $(CV_CERTS);   do rm -f "$(DESTDIR)$(CVCDIR)/$${cert}";  done
+endif

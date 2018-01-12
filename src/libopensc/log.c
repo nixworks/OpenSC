@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -60,7 +62,7 @@ void sc_do_log_noframe(sc_context_t *ctx, int level, const char *format, va_list
 
 static void sc_do_log_va(sc_context_t *ctx, int level, const char *file, int line, const char *func, const char *format, va_list args)
 {
-	char	buf[1836], *p;
+	char	buf[4096], *p;
 	int	r;
 	size_t	left;
 #ifdef _WIN32
@@ -73,9 +75,7 @@ static void sc_do_log_va(sc_context_t *ctx, int level, const char *file, int lin
 	FILE		*outf = NULL;
 	int		n;
 
-	assert(ctx != NULL);
-
-	if (ctx->debug < level)
+	if (!ctx || ctx->debug < level)
 		return;
 
 	p = buf;
@@ -84,14 +84,16 @@ static void sc_do_log_va(sc_context_t *ctx, int level, const char *file, int lin
 #ifdef _WIN32
 	GetLocalTime(&st);
 	r = snprintf(p, left,
-			"%i-%02i-%02i %02i:%02i:%02i.%03i ",
+			"P:%lu; T:%lu %i-%02i-%02i %02i:%02i:%02i.%03i ",
+			(unsigned long)GetCurrentProcessId(),
+			(unsigned long)GetCurrentThreadId(),
 			st.wYear, st.wMonth, st.wDay,
 			st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 #else
 	gettimeofday (&tv, NULL);
 	tm = localtime (&tv.tv_sec);
 	strftime (time_string, sizeof(time_string), "%H:%M:%S", tm);
-	r = snprintf(p, left, "0x%lx %s.%03ld ", (unsigned long)pthread_self(), time_string, tv.tv_usec / 1000);
+	r = snprintf(p, left, "0x%lx %s.%03ld ", (unsigned long)pthread_self(), time_string, (long)tv.tv_usec / 1000);
 #endif
 	p += r;
 	left -= r;
@@ -112,10 +114,11 @@ static void sc_do_log_va(sc_context_t *ctx, int level, const char *file, int lin
 	if (r < 0)
 		return;
 
-#ifdef _WIN32
-	if (ctx->debug_filename)
-		sc_ctx_log_to_file(ctx, ctx->debug_filename);
-#endif
+	if (ctx->reopen_log_file)   {
+		r = sc_ctx_log_to_file(ctx, ctx->debug_filename);
+		if (r < 0)
+			return;
+	}
 
 	outf = ctx->debug_file;
 	if (outf == NULL)
@@ -127,13 +130,11 @@ static void sc_do_log_va(sc_context_t *ctx, int level, const char *file, int lin
 		fprintf(outf, "\n");
 	fflush(outf);
 
-#ifdef _WIN32
-	if (ctx->debug_filename)   {
-		fclose(ctx->debug_file);
+	if (ctx->reopen_log_file)   {
+		if (ctx->debug_file && (ctx->debug_file != stderr && ctx->debug_file != stdout))
+			fclose(ctx->debug_file);
 		ctx->debug_file = NULL;
 	}
-#endif
-
 
 	return;
 }
@@ -142,9 +143,9 @@ void _sc_debug(struct sc_context *ctx, int level, const char *format, ...)
 {
 	va_list ap;
 
-        va_start(ap, format);
-        sc_do_log_va(ctx, level, NULL, 0, NULL, format, ap);
-        va_end(ap);
+	va_start(ap, format);
+	sc_do_log_va(ctx, level, NULL, 0, NULL, format, ap);
+	va_end(ap);
 }
 
 void _sc_log(struct sc_context *ctx, const char *format, ...)
@@ -156,18 +157,36 @@ void _sc_log(struct sc_context *ctx, const char *format, ...)
 	va_end(ap);
 }
 
-/* Although not used, we need this for consistent exports */
-void sc_hex_dump(struct sc_context *ctx, int level, const u8 * in, size_t count, char *buf, size_t len)
+void _sc_debug_hex(sc_context_t *ctx, int type, const char *file, int line,
+		const char *func, const char *label, const u8 *data, size_t len)
+{
+	size_t blen = len * 5 + 128;
+	char *buf = malloc(blen);
+	if (buf == NULL)
+		return;
+
+	sc_hex_dump(data, len, buf, blen);
+
+	if (label)
+		sc_do_log(ctx, type, file, line, func,
+			"\n%s (%"SC_FORMAT_LEN_SIZE_T"u byte%s):\n%s",
+			label, len, len==1?"":"s", buf);
+	else
+		sc_do_log(ctx, type, file, line, func,
+			"%"SC_FORMAT_LEN_SIZE_T"u byte%s:\n%s",
+			len, len==1?"":"s", buf);
+
+	free(buf);
+}
+
+void sc_hex_dump(const u8 * in, size_t count, char *buf, size_t len)
 {
 	char *p = buf;
 	int lines = 0;
 
-	assert(ctx != NULL);
-
-	if (ctx->debug < level)
+	if (buf == NULL || (in == NULL && count != 0)) {
 		return;
-
-	assert(buf != NULL && in != NULL);
+	}
 	buf[0] = 0;
 	if ((count * 5) > len)
 		return;
@@ -198,34 +217,49 @@ void sc_hex_dump(struct sc_context *ctx, int level, const u8 * in, size_t count,
 	}
 }
 
-char *
+const char *
 sc_dump_hex(const u8 * in, size_t count)
 {
 	static char dump_buf[0x1000];
 	size_t ii, size = sizeof(dump_buf) - 0x10;
-    	size_t offs = 0;
+	size_t offs = 0;
 
 	memset(dump_buf, 0, sizeof(dump_buf));
 	if (in == NULL)
-        	return dump_buf;
+		return dump_buf;
 
 	for (ii=0; ii<count; ii++) {
-		if (!(ii%16))   {
+		if (ii && !(ii%16))   {
 			if (!(ii%48))
 				snprintf(dump_buf + offs, size - offs, "\n");
 			else
 				snprintf(dump_buf + offs, size - offs, " ");
+			offs = strlen(dump_buf);
 		}
 
 		snprintf(dump_buf + offs, size - offs, "%02X", *(in + ii));
-		offs = strlen(dump_buf);
+		offs += 2;
 
 		if (offs > size)
-            		break;
-    	}
+			break;
+	}
 
-    	if (ii<count)
-        	snprintf(dump_buf + offs, sizeof(dump_buf) - offs, "....\n");
+	if (ii<count)
+		snprintf(dump_buf + offs, sizeof(dump_buf) - offs, "....\n");
+
+	return dump_buf;
+}
+
+const char *
+sc_dump_oid(const struct sc_object_id *oid)
+{
+	static char dump_buf[SC_MAX_OBJECT_ID_OCTETS * 20];
+        size_t ii;
+
+	memset(dump_buf, 0, sizeof(dump_buf));
+	if (oid)
+		for (ii=0; ii<SC_MAX_OBJECT_ID_OCTETS && oid->value[ii] != -1; ii++)
+			snprintf(dump_buf + strlen(dump_buf), sizeof(dump_buf) - strlen(dump_buf), "%s%i", (ii ? "." : ""), oid->value[ii]);
 
 	return dump_buf;
 }

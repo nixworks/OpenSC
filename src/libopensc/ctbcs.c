@@ -1,7 +1,7 @@
 /*
  * ctbcs.c: Extended CTBCS commands, used for pcsc and ct-api readers
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
@@ -40,51 +42,12 @@ ctbcs_init_apdu(sc_apdu_t *apdu, int cse, int ins, int p1, int p2)
 	apdu->control = 1;
 }
 
-#if 0
-static int
-ctbcs_build_input_apdu(sc_apdu_t *apdu, int echo, const char *prompt,
-			u8 *rbuf, size_t rbuflen)
-{
-	ctbcs_init_apdu(apdu, SC_APDU_CASE_2_SHORT,
-			CTBCS_INS_INPUT,
-			CTBCS_P1_KEYPAD,
-			echo? CTBCS_P2_INPUT_ECHO : CTBCS_P2_INPUT_ASTERISKS);
-
-	if (prompt && *prompt) {
-		apdu->cse = SC_APDU_CASE_4_SHORT;
-		apdu->data = (u8 *) prompt;
-		apdu->lc = apdu->datalen = strlen(prompt);
-	}
-
-	apdu->le = apdu->resplen = rbuflen;
-	apdu->resp = rbuf;
-	return 0;
-}
-
-static int
-ctbcs_build_output_apdu(sc_apdu_t *apdu, const char *message)
-{
-	ctbcs_init_apdu(apdu,
-			SC_APDU_CASE_3_SHORT,
-			CTBCS_INS_INPUT,
-			CTBCS_P1_DISPLAY,
-			0);
-
-	if (!message || !*message)
-		message = " ";
-
-	apdu->lc = apdu->datalen = strlen(message);
-
-	return 0;
-}
-#endif
-
 static int
 ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *data)
 {
 	const char *prompt;
 	size_t buflen, count = 0, j = 0, len;
-	static u8 buf[254];
+	static u8 buf[SC_MAX_APDU_BUFFER_SIZE];
 	u8 control;
 
 	ctbcs_init_apdu(apdu,
@@ -97,7 +60,7 @@ ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *d
 	prompt = data->pin1.prompt;
 	if (prompt && *prompt) {
 		len = strlen(prompt);
-		if (count + len + 2 > buflen || len > 255)
+		if (len + 2 > buflen)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[count++] = CTBCS_TAG_PROMPT;
 		buf[count++] = len;
@@ -108,7 +71,7 @@ ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *d
 	/* card apdu must be last in packet */
 	if (!data->apdu)
 		return SC_ERROR_INTERNAL;
-	if (count + 7 > buflen)
+	if (count + 12 > buflen)
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	j = count;
@@ -132,12 +95,13 @@ ctbcs_build_perform_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *d
 
 	if (data->flags & SC_PIN_CMD_NEED_PADDING) {
 		len = data->pin1.pad_length;
-		if (j + len > buflen || len > 256)
+		if (2 + j + len > buflen)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[j++] = len;
 		memset(buf+j, data->pin1.pad_char, len);
 		j += len;
 	}
+
 	buf[count+1] = j - count - 2;
 	count = j;
 
@@ -152,7 +116,7 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 {
 	const char *prompt;
 	size_t buflen, count = 0, j = 0, len;
-	static u8 buf[254];
+	static u8 buf[SC_MAX_APDU_BUFFER_SIZE];
 	u8 control;
 
 	ctbcs_init_apdu(apdu,
@@ -165,7 +129,7 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 	prompt = data->pin1.prompt;
 	if (prompt && *prompt) {
 		len = strlen(prompt);
-		if (count + len + 2 > buflen || len > 255)
+		if (len + 2 > buflen)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[count++] = CTBCS_TAG_PROMPT;
 		buf[count++] = len;
@@ -176,7 +140,7 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 	/* card apdu must be last in packet */
 	if (!data->apdu)
 		return SC_ERROR_INTERNAL;
-	if (count + 8 > buflen)
+	if (count + 12 > buflen)
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	j = count;
@@ -201,12 +165,13 @@ ctbcs_build_modify_verification_apdu(sc_apdu_t *apdu, struct sc_pin_cmd_data *da
 
 	if (data->flags & SC_PIN_CMD_NEED_PADDING) {
 		len = data->pin1.pad_length + data->pin2.pad_length;
-		if (j + len > buflen || len > 256)
+		if (2 + j + len > buflen)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		buf[j++] = len;
 		memset(buf+j, data->pin1.pad_char, len);
 		j += len;
 	}
+
 	buf[count+1] = j - count - 2;
 	count = j;
 

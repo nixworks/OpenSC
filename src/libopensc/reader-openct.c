@@ -2,9 +2,25 @@
  * reader-openct.c: backend for OpenCT
  *
  * Copyright (C) 2003  Olaf Kirch <okir@suse.de>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #ifdef ENABLE_OPENCT	/* empty file without openct */
 #include <errno.h>
@@ -44,7 +60,7 @@ static struct sc_reader_driver openct_reader_driver = {
 	"OpenCT reader",
 	"openct",
 	&openct_ops,
-	0, 0, NULL
+	NULL
 };
 
 /* private data structures */
@@ -94,13 +110,13 @@ static int
 openct_add_reader(sc_context_t *ctx, unsigned int num, ct_info_t *info)
 {
 	sc_reader_t	*reader;
+	scconf_block *conf_block;
 	struct driver_data *data;
 	int		rc;
 
 	if (!(reader = calloc(1, sizeof(*reader)))
-	 || !(data = (calloc(1, sizeof(*data))))) {
-		if (reader)
-			free(reader);
+			|| !(data = (calloc(1, sizeof(*data))))) {
+		free(reader);
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 
@@ -117,7 +133,15 @@ openct_add_reader(sc_context_t *ctx, unsigned int num, ct_info_t *info)
 	reader->drv_data = data;
 	reader->name = strdup(data->info.ct_name);
 
-	if ((rc = _sc_add_reader(ctx, reader)) < 0) { 
+	conf_block = sc_get_conf_block(ctx, "reader_driver", "openct", 1);
+	if (conf_block) {
+		reader->max_send_size = scconf_get_int(conf_block, "max_send_size", reader->max_send_size);
+		reader->max_recv_size = scconf_get_int(conf_block, "max_recv_size", reader->max_recv_size);
+		if (scconf_get_bool(conf_block, "enable_escape", 0))
+			reader->flags |= SC_READER_ENABLE_ESCAPE;
+	}
+
+	if ((rc = _sc_add_reader(ctx, reader)) < 0) {
 		free(data);
 		free(reader->name);
 		free(reader);
@@ -152,13 +176,13 @@ static int openct_reader_release(sc_reader_t *reader)
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
 	if (data) {
-		if (data->h)
+		if (data->h && !(reader->ctx->flags & SC_CTX_FLAG_TERMINATE))
 			ct_reader_disconnect(data->h);
 		sc_mem_clear(data, sizeof(*data));
 		reader->drv_data = NULL;
 		free(data);
 	}
-	
+
 	return SC_SUCCESS;
 }
 
@@ -171,6 +195,9 @@ static int openct_reader_detect_card_presence(sc_reader_t *reader)
 	int rc, status;
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	reader->flags = 0;
 	if (!data->h && !(data->h = ct_reader_connect(data->num)))
@@ -194,6 +221,9 @@ openct_reader_connect(sc_reader_t *reader)
 	int rc;
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	if (data->h)
 		ct_reader_disconnect(data->h);
@@ -240,7 +270,7 @@ static int openct_reader_disconnect(sc_reader_t *reader)
 	struct driver_data *data = (struct driver_data *) reader->drv_data;
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
-	if (data->h)
+	if (data->h && !(reader->ctx->flags & SC_CTX_FLAG_TERMINATE))
 		ct_reader_disconnect(data->h);
 	data->h = NULL;
 	return SC_SUCCESS;
@@ -253,6 +283,9 @@ openct_reader_internal_transmit(sc_reader_t *reader,
 {
 	struct driver_data *data = (struct driver_data *) reader->drv_data;
 	int rc;
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	/* Hotplug check */
 	if ((rc = openct_reader_reconnect(reader)) < 0)
@@ -310,7 +343,7 @@ out:
 		sc_mem_clear(rbuf, rbuflen);
 		free(rbuf);
 	}
-	
+
 	return r;
 }
 
@@ -321,6 +354,9 @@ static int openct_reader_perform_verify(sc_reader_t *reader, struct sc_pin_cmd_d
 	size_t j = 0;
 	u8 buf[254];
 	int rc;
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	/* Hotplug check */
 	if ((rc = openct_reader_reconnect(reader)) < 0)
@@ -380,6 +416,9 @@ static int openct_reader_lock(sc_reader_t *reader)
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
 
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 	/* Hotplug check */
 	if ((rc = openct_reader_reconnect(reader)) < 0)
 		return rc;
@@ -405,6 +444,9 @@ static int openct_reader_unlock(sc_reader_t *reader)
 	int rc;
 
 	SC_FUNC_CALLED(reader->ctx, SC_LOG_DEBUG_VERBOSE);
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	/* Not connected */
 	if (data->h == NULL)

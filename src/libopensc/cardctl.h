@@ -210,6 +210,18 @@ enum {
 	SC_CARDCTL_PIV_PIN_PREFERENCE,
 	SC_CARDCTL_PIV_OBJECT_PRESENT,
 
+	/*
+	 * CAC specific calls
+	 */
+	SC_CARDCTL_CAC_BASE = _CTL_PREFIX('C', 'A', 'C'),
+	SC_CARDCTL_CAC_INIT_GET_GENERIC_OBJECTS,
+	SC_CARDCTL_CAC_GET_NEXT_GENERIC_OBJECT,
+	SC_CARDCTL_CAC_FINAL_GET_GENERIC_OBJECTS,
+	SC_CARDCTL_CAC_INIT_GET_CERT_OBJECTS,
+	SC_CARDCTL_CAC_GET_NEXT_CERT_OBJECT,
+	SC_CARDCTL_CAC_FINAL_GET_CERT_OBJECTS,
+	SC_CARDCTL_CAC_GET_ACA_PATH,
+
         /*
 	 * AuthentIC v3
 	 */
@@ -218,6 +230,17 @@ enum {
         SC_CARDCTL_AUTHENTIC_SDO_DELETE,
         SC_CARDCTL_AUTHENTIC_SDO_STORE,
         SC_CARDCTL_AUTHENTIC_SDO_GENERATE,
+
+	/*
+	 * Coolkey specific calls
+	 */
+	SC_CARDCTL_COOLKEY_BASE = _CTL_PREFIX('C', 'O', 'K'),
+	SC_CARDCTL_COOLKEY_INIT_GET_OBJECTS,
+	SC_CARDCTL_COOLKEY_GET_NEXT_OBJECT,
+	SC_CARDCTL_COOLKEY_FINAL_GET_OBJECTS,
+	SC_CARDCTL_COOLKEY_GET_ATTRIBUTE,
+	SC_CARDCTL_COOLKEY_GET_TOKEN_INFO,
+	SC_CARDCTL_COOLKEY_FIND_OBJECT,
 
         /*
 	 * IAS/ECC
@@ -248,7 +271,38 @@ enum {
 	SC_CARDCTL_SC_HSM_INITIALIZE,
 	SC_CARDCTL_SC_HSM_IMPORT_DKEK_SHARE,
 	SC_CARDCTL_SC_HSM_WRAP_KEY,
-	SC_CARDCTL_SC_HSM_UNWRAP_KEY
+	SC_CARDCTL_SC_HSM_UNWRAP_KEY,
+
+	/*
+	 * DNIe specific calls
+	 */
+    SC_CARDCTL_DNIE_BASE = _CTL_PREFIX('D', 'N', 'I'),
+	SC_CARDCTL_DNIE_GENERATE_KEY,
+	SC_CARDCTL_DNIE_GET_INFO,
+
+	/*
+	 * isoApplet Java Card Applet
+	 */
+	SC_CARDCTL_ISOAPPLET_BASE = _CTL_PREFIX('I','S','O'),
+	SC_CARDCTL_ISOAPPLET_GENERATE_KEY,
+	SC_CARDCTL_ISOAPPLET_IMPORT_KEY,
+
+	/*
+	 * GIDS cards
+	 */
+	SC_CARDCTL_GIDS_BASE = _CTL_PREFIX('G','I','D'),
+	SC_CARDCTL_GIDS_GET_ALL_CONTAINERS,
+	SC_CARDCTL_GIDS_GET_CONTAINER_DETAIL,
+	SC_CARDCTL_GIDS_SELECT_KEY_REFERENCE,
+	SC_CARDCTL_GIDS_CREATE_KEY,
+	SC_CARDCTL_GIDS_GENERATE_KEY,
+	SC_CARDCTL_GIDS_IMPORT_KEY,
+	SC_CARDCTL_GIDS_SAVE_CERT,
+	SC_CARDCTL_GIDS_DELETE_KEY,
+	SC_CARDCTL_GIDS_DELETE_CERT,
+	SC_CARDCTL_GIDS_INITIALIZE,
+	SC_CARDCTL_GIDS_SET_ADMIN_KEY,
+	SC_CARDCTL_GIDS_AUTHENTICATE_ADMIN,
 };
 
 enum {
@@ -273,16 +327,16 @@ struct sc_cardctl_default_key {
  * Generic cardctl - initialize token using PKCS#11 style
  */
 typedef struct sc_cardctl_pkcs11_init_token {
-	const char *	so_pin;
+	const unsigned char *	so_pin;
 	size_t			so_pin_len;
-	const char *	label;
+	const char *		label;
 } sc_cardctl_pkcs11_init_token_t;
 
 /*
  * Generic cardctl - set pin using PKCS#11 style
  */
 typedef struct sc_cardctl_pkcs11_init_pin {
-	const char *	pin;
+	const unsigned char *	pin;
 	size_t			pin_len;
 } sc_cardctl_pkcs11_init_pin_t;
 
@@ -437,7 +491,9 @@ enum SC_CARDCTL_OBERTHUR_KEY_TYPE {
 	SC_CARDCTL_OBERTHUR_KEY_RSA_SFM,
 	SC_CARDCTL_OBERTHUR_KEY_RSA_CRT,
 	SC_CARDCTL_OBERTHUR_KEY_DSA_PUBLIC,
-	SC_CARDCTL_OBERTHUR_KEY_DSA_PRIVATE
+	SC_CARDCTL_OBERTHUR_KEY_DSA_PRIVATE,
+	SC_CARDCTL_OBERTHUR_KEY_EC_CRT,
+	SC_CARDCTL_OBERTHUR_KEY_EC_PUBLIC
 };
 
 struct sc_cardctl_oberthur_genkey_info {
@@ -509,9 +565,9 @@ typedef struct sc_cardctl_muscle_key_info {
 	int 	keyType;
 	int 	keyLocation;
 	int 	keySize;
-	int 	modLength;
+	size_t 	modLength;
 	u8* 	modValue;
-	int 	expLength;
+	size_t 	expLength;
 	u8* 	expValue;
 	int 	pLength;
 	u8* 	pValue;
@@ -825,10 +881,9 @@ typedef struct sc_rtecp_genkey_data {
  */
 	enum SC_CARDCTL_MYEID_KEY_TYPE {
 		SC_CARDCTL_MYEID_KEY_RSA = 0x11,
-		SC_CARDCTL_MYEID_KEY_EC  = 0x21,
-	/*	SC_CARDCTL_MYEID_KEY_AES = 0x?, // for future use
-		SC_CARDCTL_MYEID_KEY_DES = 0x?,
-		SC_CARDCTL_MYEID_KEY_3DES = 0x?, */
+		SC_CARDCTL_MYEID_KEY_DES = 0x19,
+		SC_CARDCTL_MYEID_KEY_EC  = 0x22,
+		SC_CARDCTL_MYEID_KEY_AES = 0x29
 	};
 
 	struct sc_cardctl_myeid_data_obj {
@@ -857,8 +912,8 @@ typedef struct sc_rtecp_genkey_data {
 		unsigned int    invq_len;  
 		unsigned char  *invq;
 		/* new for MyEID > 3.6.0 */
-		unsigned char  *d;                  /* EC private key */
-		unsigned int    d_len;              /* EC */ 
+		unsigned char  *d;                  /* EC private key / Symmetric key */
+		unsigned int    d_len;              /* EC / Symmetric */
 		unsigned char  *ecpublic_point;     /* EC public key */
 		unsigned int    ecpublic_point_len; /* EC */
     };
@@ -931,8 +986,9 @@ typedef struct sc_cardctl_sc_hsm_init_param {
 	u8 *user_pin;				/* Initial user PIN */
 	size_t user_pin_len;		/* Length of user PIN */
 	u8 user_pin_retry_counter;	/* Retry counter default value */
-	u8 options[2];				/* Initilization options */
-	char dkek_shares;			/* Number of DKEK shares, 0 for card generated, -1 for none */
+	u8 options[2];				/* Initialization options */
+	signed char dkek_shares;	/* Number of DKEK shares, 0 for card generated, -1 for none */
+	char *label;				/* Token label to be set in EF.TokenInfo (2F03) */
 } sc_cardctl_sc_hsm_init_param_t;
 
 typedef struct sc_cardctl_sc_hsm_dkek {
@@ -948,6 +1004,93 @@ typedef struct sc_cardctl_sc_hsm_wrapped_key {
 	u8 *wrapped_key;			/* Binary wrapped key */
 	size_t wrapped_key_length;	/* Length of key blob */
 } sc_cardctl_sc_hsm_wrapped_key_t;
+
+/*
+ * isoApplet
+ */
+
+#define SC_ISOAPPLET_ALG_REF_RSA_GEN_2048 0xF3
+#define SC_ISOAPPLET_ALG_REF_EC_GEN 0xEC
+
+typedef struct sc_cardctl_isoApplet_ec_parameters {
+	struct sc_lv_data prime;
+	struct sc_lv_data coefficientA;
+	struct sc_lv_data coefficientB;
+	struct sc_lv_data basePointG;
+	struct sc_lv_data order;
+	struct sc_lv_data coFactor;
+} sc_cardctl_isoApplet_ec_parameters_t;
+
+typedef struct sc_cardctl_isoApplet_genkey {
+	u8 algorithm_ref;			/* Algorithm reference sent to card */
+	unsigned int priv_key_ref;	/* Private key refernce sent to card */
+	union {
+		struct
+		{
+			struct sc_lv_data modulus;
+			struct sc_lv_data exponent;
+		} rsa;
+		struct
+		{
+			sc_cardctl_isoApplet_ec_parameters_t params;
+			struct sc_lv_data ecPointQ;
+		} ec;
+	} pubkey;
+} sc_cardctl_isoApplet_genkey_t;
+
+typedef struct sc_cardctl_isoApplet_import_key {
+	u8 algorithm_ref;			/* Algorithm reference sent to card */
+	unsigned int priv_key_ref;	/* Private key refernce sent to card */
+	union {
+		struct
+		{
+			struct sc_lv_data p;
+			struct sc_lv_data q;
+			struct sc_lv_data iqmp;
+			struct sc_lv_data dmp1;
+			struct sc_lv_data dmq1;
+		} rsa;
+		struct
+		{
+			sc_cardctl_isoApplet_ec_parameters_t params;
+			struct sc_lv_data privateD;
+		} ec;
+	} privkey;
+} sc_cardctl_isoApplet_import_key_t;
+
+/*
+ * coolkey object returned from the card control interface
+ */
+typedef struct sc_cardctl_coolkey_object {
+        sc_path_t path;
+        unsigned long id;
+        size_t length;
+        u8  *data;
+} sc_cardctl_coolkey_object_t;
+
+
+/* data structure to pass attributes through the ctl interface */
+typedef struct sc_cardctl_coolkey_attribute {
+        const sc_cardctl_coolkey_object_t *object;
+	unsigned long attribute_type;
+        u8 attribute_data_type;
+        size_t attribute_length;
+        const u8 *attribute_value;
+} sc_cardctl_coolkey_attribute_t;
+
+#define SC_CARDCTL_COOLKEY_ATTR_TYPE_STRING 0
+#define SC_CARDCTL_COOLKEY_ATTR_TYPE_ULONG 1
+
+typedef struct sc_cardctl_coolkey_find_object {
+	int type; /* in parameter */
+	unsigned long find_id; /* in parameter */
+	sc_cardctl_coolkey_attribute_t *coolkey_template; /* in paramter */
+	int template_count;                       /* in parameter */
+	sc_cardctl_coolkey_object_t *obj; /* out parameter */
+} sc_cardctl_coolkey_find_object_t;
+
+#define SC_CARDCTL_COOLKEY_FIND_BY_ID       0
+#define SC_CARDCTL_COOLKEY_FIND_BY_TEMPLATE 1
 
 #ifdef __cplusplus
 }

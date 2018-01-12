@@ -30,22 +30,29 @@
 #include <config.h>
 #endif
 
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#ifdef ENABLE_OPENSSL
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#endif
+
+#include "internal.h"
 #include "pkcs15.h"
 #include "log.h"
 #include "cards.h"
 #include "itacns.h"
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
 #include "common/compat_strlcpy.h"
 #include "common/compat_strlcat.h"
 
 #ifdef ENABLE_OPENSSL
+#include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #endif
 
-int sc_pkcs15emu_itacns_init_ex(sc_pkcs15_card_t *,
-				    sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_itacns_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static const char path_serial[] = "10001003";
 
@@ -199,8 +206,8 @@ static int itacns_add_cert(sc_pkcs15_card_t *p15card,
 	sc_pkcs15_object_t    obj;
 #ifdef ENABLE_OPENSSL
 	X509 *x509;
-#endif
 	sc_pkcs15_cert_t *cert;
+#endif
 
 	SC_FUNC_CALLED(p15card->card->ctx, 1);
 	
@@ -242,10 +249,11 @@ static int itacns_add_cert(sc_pkcs15_card_t *p15card,
 	sc_pkcs15_free_certificate(cert);
 	if (!x509) return SC_SUCCESS;
 	X509_check_purpose(x509, -1, 0);
-	if(x509->ex_flags & EXFLAG_KUSAGE) {
+
+	if(X509_get_extension_flags(x509) & EXFLAG_KUSAGE) {
 		*ext_info_ok = 1;
-		*key_usage = x509->ex_kusage;
-		*x_key_usage = x509->ex_xkusage;
+		*key_usage = X509_get_key_usage(x509);
+		*x_key_usage = X509_get_extended_key_usage(x509);
 	}
 	OPENSSL_free(x509);
 
@@ -319,11 +327,6 @@ static int itacns_add_prkey(sc_pkcs15_card_t *p15card,
 	info.usage		= usage;
 	info.native		= 1;
 	info.key_reference	= ref;
-	info.access_flags	=
-			SC_PKCS15_PRKEY_ACCESS_SENSITIVE
-			| SC_PKCS15_PRKEY_ACCESS_ALWAYSSENSITIVE
-			| SC_PKCS15_PRKEY_ACCESS_NEVEREXTRACTABLE
-			| SC_PKCS15_PRKEY_ACCESS_LOCAL;
 
 	if (path)
 	        info.path = *path;
@@ -360,6 +363,7 @@ static int itacns_add_pin(sc_pkcs15_card_t *p15card,
 	pin_info.attrs.pin.stored_length = 8;
 	pin_info.attrs.pin.max_length = 8;
 	pin_info.attrs.pin.pad_char = 0xff;
+	pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 	if(path)
         pin_info.path = *path;
 
@@ -469,8 +473,10 @@ static int get_name_from_EF_DatiPersonali(unsigned char *EFdata,
 	if (fields[f_first_name].len + fields[f_last_name].len + 1 >= name_len)
 		return -1;
 
-	snprintf(name, name_len, "%s %s",
-		fields[f_first_name].value, fields[f_last_name].value);
+	/* the lengths are already checked that they will fit in buffer */
+	snprintf(name, name_len, "%.*s %.*s",
+		fields[f_first_name].len, fields[f_first_name].value,
+		fields[f_last_name].len, fields[f_last_name].value);
 	return 0;
 }
 
@@ -504,6 +510,8 @@ static int itacns_add_data_files(sc_pkcs15_card_t *p15card)
 			sizeof(obj.label));
 		data.path = path;
 		rv = sc_pkcs15emu_add_data_object(p15card, &obj, &data);
+		SC_TEST_RET(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, rv,
+			"Could not add data file");
 	}
 
 	/*
@@ -850,8 +858,8 @@ static int itacns_init(sc_pkcs15_card_t *p15card)
 	return r;
 }
 
-int sc_pkcs15emu_itacns_init_ex(sc_pkcs15_card_t *p15card,
-				    sc_pkcs15emu_opt_t *opts)
+int sc_pkcs15emu_itacns_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid,
+		sc_pkcs15emu_opt_t *opts)
 {
 	sc_card_t *card = p15card->card;
 	SC_FUNC_CALLED(card->ctx, 1);

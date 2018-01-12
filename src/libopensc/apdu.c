@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +39,7 @@
  *  @param  proto  the desired protocol
  *  @return length of the encoded APDU
  */
-static size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto)
+size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto)
 {
 	size_t ret = 4;
 
@@ -78,7 +80,7 @@ static size_t sc_apdu_get_length(const sc_apdu_t *apdu, unsigned int proto)
  *  @param  outlen  size of hte output buffer
  *  @return SC_SUCCESS on success and an error code otherwise
  */
-static int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
+int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
 	unsigned int proto, u8 *out, size_t outlen)
 {
 	u8     *p = out;
@@ -169,23 +171,6 @@ static int sc_apdu2bytes(sc_context_t *ctx, const sc_apdu_t *apdu,
 	return SC_SUCCESS;
 }
 
-void sc_apdu_log(sc_context_t *ctx, int level, const u8 *data, size_t len, int is_out)
-{
-	size_t blen = len * 5 + 128;
-	char   *buf = malloc(blen);
-	if (buf == NULL)
-		return;
-
-	sc_hex_dump(ctx, level, data, len, buf, blen);
-
-	sc_debug(ctx, level, "\n%s APDU data [%5u bytes] =====================================\n"
-		"%s"
-		"======================================================================\n",
-		is_out != 0 ? "Outgoing" : "Incoming", len,
-		buf);
-	free(buf);
-}
-
 int sc_apdu_get_octets(sc_context_t *ctx, const sc_apdu_t *apdu, u8 **buf,
 	size_t *len, unsigned int proto)
 {
@@ -203,8 +188,10 @@ int sc_apdu_get_octets(sc_context_t *ctx, const sc_apdu_t *apdu, u8 **buf,
 	if (nbuf == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
 	/* encode the APDU in the buffer */
-	if (sc_apdu2bytes(ctx, apdu, proto, nbuf, nlen) != SC_SUCCESS)
+	if (sc_apdu2bytes(ctx, apdu, proto, nbuf, nlen) != SC_SUCCESS) {
+		free(nbuf);
 		return SC_ERROR_INTERNAL;
+	}
 	*buf = nbuf;
 	*len = nlen;
 
@@ -269,9 +256,11 @@ int
 sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 {
 	if ((apdu->cse & ~SC_APDU_SHORT_MASK) == 0) {
-		/* length check for short APDU    */
-		if (apdu->le > 256 || (apdu->lc > 255 && (apdu->flags & SC_APDU_FLAGS_CHAINING) == 0))
+		/* length check for short APDU */
+		if (apdu->le > 256 || (apdu->lc > 255 && (apdu->flags & SC_APDU_FLAGS_CHAINING) == 0))   {
+			sc_log(card->ctx, "failed length check for short APDU");
 			goto error;
+		}
 	}
 	else if ((apdu->cse & SC_APDU_EXT) != 0) {
 		/* check if the card supports extended APDUs */
@@ -280,8 +269,10 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 			goto error;
 		}
 		/* length check for extended APDU */
-		if (apdu->le > 65536 || apdu->lc > 65535)
+		if (apdu->le > 65536 || apdu->lc > 65535)   {
+			sc_log(card->ctx, "failed length check for extended APDU");
 			goto error;
+		}
 	}
 	else   {
 		goto error;
@@ -294,7 +285,7 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 			goto error;
 		break;
 	case SC_APDU_CASE_2_SHORT:
-		/* no data is sent        */
+		/* no data is sent */
 		if (apdu->datalen != 0 || apdu->lc != 0)
 			goto error;
 		/* data is expected       */
@@ -306,7 +297,7 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 			goto error;
 		break;
 	case SC_APDU_CASE_3_SHORT:
-		/* data is sent           */
+		/* data is sent */
 		if (apdu->datalen == 0 || apdu->data == NULL || apdu->lc == 0)
 			goto error;
 		/* no data is expected    */
@@ -317,7 +308,7 @@ sc_check_apdu(sc_card_t *card, const sc_apdu_t *apdu)
 			goto error;
 		break;
 	case SC_APDU_CASE_4_SHORT:
-		/* data is sent           */
+		/* data is sent */
 		if (apdu->datalen == 0 || apdu->data == NULL || apdu->lc == 0)
 			goto error;
 		/* data is expected       */
@@ -381,11 +372,15 @@ sc_single_transmit(struct sc_card *card, struct sc_apdu *apdu)
 	if (card->reader->ops->transmit == NULL)
 		LOG_TEST_RET(card->ctx, SC_ERROR_NOT_SUPPORTED, "cannot transmit APDU");
 
-	sc_log(ctx, "CLA:%X, INS:%X, P1:%X, P2:%X, data(%i) %p",
-			apdu->cla, apdu->ins, apdu->p1, apdu->p2, apdu->datalen, apdu->data);
+	sc_log(ctx,
+	       "CLA:%X, INS:%X, P1:%X, P2:%X, data(%"SC_FORMAT_LEN_SIZE_T"u) %p",
+	       apdu->cla, apdu->ins, apdu->p1, apdu->p2, apdu->datalen,
+	       apdu->data);
 #ifdef ENABLE_SM
-	if (card->sm_ctx.sm_mode == SM_MODE_TRANSMIT)
-		return sc_sm_single_transmit(card, apdu);
+	if (card->sm_ctx.sm_mode == SM_MODE_TRANSMIT
+		   	&& (apdu->flags & SC_APDU_FLAGS_NO_SM) == 0) {
+		LOG_FUNC_RETURN(ctx, sc_sm_single_transmit(card, apdu));
+	}
 #endif
 
 	/* send APDU to the reader driver */
@@ -410,7 +405,7 @@ sc_set_le_and_transmit(struct sc_card *card, struct sc_apdu *apdu, size_t olen)
 		LOG_TEST_RET(ctx, SC_ERROR_WRONG_LENGTH, "wrong length: required length exceeds resplen");
 
 	/* don't try again if it doesn't work this time */
-	apdu->flags  |= SC_APDU_FLAGS_NO_GET_RESP;
+	apdu->flags  |= SC_APDU_FLAGS_NO_RETRY_WL;
 	/* set the new expected length */
 	apdu->resplen = olen;
 	apdu->le      = nlen;
@@ -473,7 +468,7 @@ sc_get_response(struct sc_card *card, struct sc_apdu *apdu, size_t olen)
 		if (rv < 0)   {
 #ifdef ENABLE_SM
 			if (resp_len)   {
-				sc_log(ctx, "SM response data %s", sc_dump_hex(resp, resp_len));
+				sc_log_hex(ctx, "SM response data", resp, resp_len);
 				sc_sm_update_apdu_response(card, resp, resp_len, rv, apdu);
 			}
 #endif
@@ -500,7 +495,7 @@ sc_get_response(struct sc_card *card, struct sc_apdu *apdu, size_t olen)
 			/* if the card has returned 0x9000 but we still expect data ask for more
 			 * until we have read enough bytes */
 			le = minlen;
-	} while (rv != 0 || minlen != 0);
+	} while (rv != 0 && minlen != 0);
 
 	/* we've read all data, let's return 0x9000 */
 	apdu->resplen = buf - apdu->resp;
@@ -577,7 +572,7 @@ int sc_transmit_apdu(sc_card_t *card, sc_apdu_t *apdu)
 		 * bytes using command chaining */
 		size_t    len  = apdu->datalen;
 		const u8  *buf = apdu->data;
-		size_t    max_send_size = card->max_send_size > 0 ? card->max_send_size : 255;
+		size_t    max_send_size = sc_get_max_send_size(card);
 
 		while (len != 0) {
 			size_t    plen;
@@ -668,8 +663,9 @@ sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu)
 
 	if (!len) {
 		apdu->cse = SC_APDU_CASE_1;
-		sc_log(ctx, "CASE_1 APDU: %lu bytes:\tins=%02x p1=%02x p2=%02x lc=%04x le=%04x",
-			(unsigned long) len0, apdu->ins, apdu->p1, apdu->p2, apdu->lc, apdu->le);
+		sc_log(ctx,
+		       "CASE_1 APDU: %"SC_FORMAT_LEN_SIZE_T"u bytes:\tins=%02x p1=%02x p2=%02x lc=%04"SC_FORMAT_LEN_SIZE_T"x le=%04"SC_FORMAT_LEN_SIZE_T"x",
+		       len0, apdu->ins, apdu->p1, apdu->p2, apdu->lc, apdu->le);
 		return SC_SUCCESS;
 	}
 
@@ -690,7 +686,9 @@ sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu)
 			apdu->lc += *p++;
 			len -= 3;
 			if (len < apdu->lc) {
-				sc_log(ctx, "APDU too short (need %lu more bytes)", (unsigned long) apdu->lc - len);
+				sc_log(ctx,
+				       "APDU too short (need %"SC_FORMAT_LEN_SIZE_T"u more bytes)",
+				       apdu->lc - len);
 				return SC_ERROR_INVALID_DATA;
 			}
 			apdu->data = p;
@@ -728,7 +726,9 @@ sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu)
 			apdu->lc = *p++;
 			len--;
 			if (len < apdu->lc) {
-				sc_log(ctx, "APDU too short (need %lu more bytes)", (unsigned long) apdu->lc - len);
+				sc_log(ctx,
+				       "APDU too short (need %"SC_FORMAT_LEN_SIZE_T"u more bytes)",
+				       apdu->lc - len);
 				return SC_ERROR_INVALID_DATA;
 			}
 			apdu->data = p;
@@ -752,10 +752,12 @@ sc_bytes2apdu(sc_context_t *ctx, const u8 *buf, size_t len, sc_apdu_t *apdu)
 		return SC_ERROR_INVALID_DATA;
 	}
 
-	sc_log(ctx, "Case %d %s APDU, %lu bytes:\tins=%02x p1=%02x p2=%02x lc=%04x le=%04x",
-			apdu->cse & SC_APDU_SHORT_MASK,
-			(apdu->cse & SC_APDU_EXT) != 0 ? "extended" : "short",
-			(unsigned long) len0, apdu->ins, apdu->p1, apdu->p2, apdu->lc, apdu->le);
+	sc_log(ctx,
+	       "Case %d %s APDU, %"SC_FORMAT_LEN_SIZE_T"u bytes:\tins=%02x p1=%02x p2=%02x lc=%04"SC_FORMAT_LEN_SIZE_T"x le=%04"SC_FORMAT_LEN_SIZE_T"x",
+	       apdu->cse & SC_APDU_SHORT_MASK,
+	       (apdu->cse & SC_APDU_EXT) != 0 ? "extended" : "short",
+	       len0, apdu->ins, apdu->p1, apdu->p2, apdu->lc,
+	       apdu->le);
 
 	return SC_SUCCESS;
 }

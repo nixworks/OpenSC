@@ -35,6 +35,12 @@
 			<variablelist>
 				<varlistentry>
 					<term>
+						<option>--version</option>,
+					</term>
+					<listitem><para>Print the OpenSC package release version.</para></listitem>
+				</varlistentry>
+				<varlistentry>
+					<term>
 						<option>--atr</option>,
 						<option>-a</option>
 					</term>
@@ -91,6 +97,13 @@
 					</term>
 					<listitem><para>Use the given reader number.
 					The default is <literal>0</literal>, the first reader in the system.</para></listitem>
+				</varlistentry>
+				<varlistentry>
+					<term>
+						<option>--reset</option>[=<replaceable>type</replaceable>],
+					</term>
+					<listitem><para>Resets the card in reader.
+					The default reset type is <literal>cold</literal>, but warm reset is also possible.</para></listitem>
 				</varlistentry>
 				<varlistentry>
 					<term>

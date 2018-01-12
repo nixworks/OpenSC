@@ -73,7 +73,6 @@ static int create_sysdf(sc_profile_t *profile, sc_card_t *card, const char *name
 					SC_AC_NEVER, SC_AC_KEY_REF_NONE);
 		if (r == SC_SUCCESS)
 			r = sc_create_file(card, file);
-		assert(file);
 		sc_file_free(file);
 	}
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
@@ -99,7 +98,6 @@ static int rtecp_init(sc_profile_t *profile, sc_pkcs15_card_t *p15card)
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Get MF info failed");
 	assert(file);
 	r = sc_create_file(card, file);
-	assert(file);
 	sc_file_free(file);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Create MF failed");
 
@@ -107,7 +105,6 @@ static int rtecp_init(sc_profile_t *profile, sc_pkcs15_card_t *p15card)
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Get DIR file info failed");
 	assert(file);
 	r = sc_create_file(card, file);
-	assert(file);
 	sc_file_free(file);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Create DIR file failed");
 
@@ -208,11 +205,13 @@ static int rtecp_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 
 	snprintf(pin_sname, sizeof(pin_sname), "CHV%i", auth_info->attrs.pin.reference);
 	if (auth_info->attrs.pin.reference == RTECP_USER_PIN_REF)   {
-	        r = sc_profile_get_file(profile, pin_sname, &file);
+		r = sc_profile_get_file(profile, pin_sname, &file);
 		if (!r)   {
 			const struct sc_acl_entry *acl = NULL;
 
 			r = sc_pkcs15init_fixup_file(profile, p15card, file);
+			if (r < 0)
+				sc_file_free(file);
 			SC_TEST_RET(p15card->card->ctx, SC_LOG_DEBUG_NORMAL, r, "Cannot fixup the ACLs of PIN file");
 
 			acl = sc_file_get_acl_entry(file, SC_AC_OP_PIN_RESET);
@@ -285,14 +284,14 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		sc_pkcs15_object_t *obj)
 {
 	sc_context_t *ctx;
-	/*                              RSA_PRkey/ for Miller-
-	 *                              RSA_PUBkey  Rabin test    Attempts Reserve */
-	const unsigned char prkey_prop[]  = { 0x23,       0x1F, 0,    0xFF, 0, 0 };
-	const unsigned char pbkey_prop[]  = { 0x33,       0x1F, 0,    0xFF, 0, 0 };
+	/*                              RSA_PRkey/ Adds Miller-
+	 *                              RSA_PUBkey Rabin tests    Attempts Reserve */
+	const unsigned char prkey_prop[]  = { 0x23,          0, 0,    0xAA, 0, 0 };
+	const unsigned char pbkey_prop[]  = { 0x33,          0, 0,    0xAA, 0, 0 };
 	/*                  GOSTR3410_PRkey/
 	 *                  GOSTR3410_PUBkey  paramset    Attempts Reserve */
-	unsigned char prgkey_prop[] = { 0x03,      '?', 0,    0xFF, 0, 0 };
-	unsigned char pbgkey_prop[] = { 0x13,      '?', 0,    0xFF, 0, 0 };
+	unsigned char prgkey_prop[] = { 0x03,      '?', 0,    0xAA, 0, 0 };
+	unsigned char pbgkey_prop[] = { 0x13,      '?', 0,    0xAA, 0, 0 };
 	/*                        AccessMode  - Update  Use  -  -  - Delete */
 	unsigned char prkey_sec[15] = { 0x46, 0,   '?', '?', 0, 0, 0,   '?' };
 	unsigned char pbkey_sec[15] = { 0x46, 0,   '?',   0, 0, 0, 0,   '?' };
@@ -322,7 +321,9 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 				&& key_info->modulus_length
 				!= SC_PKCS15_GOSTR3410_KEYSIZE))
 	{
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Unsupported key size %u\n", key_info->modulus_length);
+		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			 "Unsupported key size %"SC_FORMAT_LEN_SIZE_T"u\n",
+			 key_info->modulus_length);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 	if (obj->type == SC_PKCS15_TYPE_PRKEY_GOSTR3410)
@@ -344,7 +345,6 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	r = sc_file_add_acl_entry(file, SC_AC_OP_CREATE, SC_AC_CHV, auth_id);
 	if (r == SC_SUCCESS)
 		r = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_CREATE);
-	assert(file);
 	sc_file_free(file);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Authenticate failed");
 
@@ -353,6 +353,7 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 	file->id = key_info->key_reference;
 	r = sc_file_set_type_attr(file, (const u8*)"\x10\x00", 2);
+
 	/* private key file */
 	if (obj->type == SC_PKCS15_TYPE_PRKEY_RSA)
 		file->size = key_info->modulus_length / 8 / 2 * 5 + 8;
@@ -373,8 +374,10 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		else
 			r = sc_file_set_prop_attr(file, prgkey_prop,sizeof(prgkey_prop));
 	}
-	if (r == SC_SUCCESS)
+	if (r == SC_SUCCESS)  {
+		sc_log(ctx, "create private key file id:%04i", file->id);
 		r = sc_create_file(p15card->card, file);
+	}
 	/* public key file */
 	if (obj->type == SC_PKCS15_TYPE_PRKEY_RSA)
 		file->size = key_info->modulus_length / 8 / 2 * 3;
@@ -394,9 +397,10 @@ static int rtecp_create_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		else
 			r = sc_file_set_prop_attr(file, pbgkey_prop,sizeof(pbgkey_prop));
 	}
-	if (r == SC_SUCCESS)
+	if (r == SC_SUCCESS)   {
+		sc_log(ctx, "create public key file id:%04i", file->id);
 		r = sc_create_file(p15card->card, file);
-	assert(file);
+	}
 	sc_file_free(file);
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, r);
 }
@@ -628,6 +632,51 @@ static int rtecp_finalize(sc_card_t *card)
 	return sc_card_ctl(card, SC_CARDCTL_RTECP_INIT_END, NULL);
 }
 
+
+/*
+ * Delete object
+ * 
+ * Applied to private key: used to delete public part internal file
+ */
+static int rtecp_delete_object(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
+		struct sc_pkcs15_object *obj, const struct sc_path *path)
+{
+	sc_context_t *ctx;
+	sc_file_t *df;
+	sc_path_t pubkey_path;
+	int key_ref;
+	int r;
+
+	if (!profile || !p15card || !p15card->card || !p15card->card->ctx)
+		return SC_ERROR_INVALID_ARGUMENTS;
+
+	ctx = p15card->card->ctx;
+	LOG_FUNC_CALLED(ctx);
+	sc_log(ctx, "delete object: type %X, path %s", obj->type, sc_print_path(path));
+
+	if ((obj->type & SC_PKCS15_TYPE_CLASS_MASK) != SC_PKCS15_TYPE_PRKEY)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
+
+	key_ref = ((struct sc_pkcs15_prkey_info *)obj->data)->key_reference;
+	sc_log(ctx, "key reference %04i", key_ref);
+
+	r = sc_profile_get_file(profile, "PuKey-DF", &df);
+	LOG_TEST_RET(ctx, r, "Get PuKey-DF info failed");
+	pubkey_path = df->path;
+	sc_file_free(df);
+
+	r = sc_append_file_id(&pubkey_path, key_ref);
+	LOG_TEST_RET(ctx, r, "Append ID to file failed");
+
+	sc_log(ctx, "delete pubkey file %s", sc_print_path(&pubkey_path));
+	r = sc_pkcs15init_delete_by_path(profile, p15card, &pubkey_path);
+	if (r && r != SC_ERROR_FILE_NOT_FOUND)
+		LOG_FUNC_RETURN(ctx, r);
+
+	LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
+}
+
+
 static struct sc_pkcs15init_operations sc_pkcs15init_rtecp_operations = {
 	rtecp_erase,                    /* erase_card */
 	rtecp_init,                     /* init_card */
@@ -642,7 +691,7 @@ static struct sc_pkcs15init_operations sc_pkcs15init_rtecp_operations = {
 	NULL,                           /* encode_private_key */
 	NULL,                           /* encode_public_key */
 	rtecp_finalize,                 /* finalize_card */
-	NULL,                           /* delete_object */
+	rtecp_delete_object,            /* delete_object */
 	NULL, NULL, NULL, NULL, NULL,   /* pkcs15init emulation */
 	NULL                            /* sanity_check */
 };

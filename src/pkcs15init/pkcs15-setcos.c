@@ -123,12 +123,16 @@ setcos_init_card(sc_profile_t *profile, sc_pkcs15_card_t *p15card)
 
 		/* Fix up the file's ACLs */
 		r = sc_pkcs15init_fixup_file(profile, p15card, pinfile);
+		if (r < 0)
+			sc_file_free(pinfile);
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Pinfile fixup failed");
 
 		/* Set life cycle state to SC_FILE_STATUS_CREATION,
 		 * which means that all ACs are ignored. */
 		pinfile->status = SC_FILE_STATUS_CREATION;
 		r = sc_create_file(p15card->card, pinfile);
+		if (r < 0)
+			sc_file_free(pinfile);
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Pinfile creation failed");
 	}
 	sc_file_free(pinfile);
@@ -236,8 +240,7 @@ setcos_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Cannot set MF into the activated state");
 	}
 
-	if(pinfile)
-		sc_file_free(pinfile);
+	sc_file_free(pinfile);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, r);
 }
@@ -414,8 +417,7 @@ setcos_store_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 	r = sc_card_ctl(p15card->card, SC_CARDCTL_SETCOS_GENERATE_STORE_KEY, &args);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "Card control 'GENERATE_STORE_KEY' failed");
 
-	if (file)
-		sc_file_free(file);
+	sc_file_free(file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, r);
 }
@@ -484,8 +486,9 @@ setcos_generate_key(struct sc_profile *profile, struct sc_pkcs15_card *p15card,
 
 		keybits = ((raw_pubkey[0] * 256) + raw_pubkey[1]);  /* modulus bit length */
 		if (keybits != key_info->modulus_length)  {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "key-size from card[%i] does not match[%i]\n",
-					keybits, key_info->modulus_length);
+			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+				 "key-size from card[%"SC_FORMAT_LEN_SIZE_T"u] does not match[%"SC_FORMAT_LEN_SIZE_T"u]\n",
+				 keybits, key_info->modulus_length);
 			SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_PKCS15INIT, "Failed to generate key");
 		}
 		memcpy (pubkey->u.rsa.modulus.data, &raw_pubkey[2], pubkey->u.rsa.modulus.len);

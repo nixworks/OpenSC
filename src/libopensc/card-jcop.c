@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -267,7 +269,7 @@ static int jcop_select_file(sc_card_t *card, const sc_path_t *path,
 	  }
 	  if ((r = iso_ops->select_file(card, &drvdata->aid, fileptr)) < 0)
 	       return r;
-	  if ((selecting & SELECTING_TARGET) == SELECT_APPDF) {
+	  if (fileptr && (selecting & SELECTING_TARGET) == SELECT_APPDF) {
 	       (*fileptr)->type = SC_FILE_TYPE_DF;
 	       drvdata->selected=SELECT_APPDF;
 	       goto select_ok;
@@ -314,7 +316,6 @@ static int jcop_read_binary(sc_card_t *card, unsigned int idx,
      struct jcop_private_data *drvdata=DRVDATA(card);
      struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
      const struct sc_card_operations *iso_ops = iso_drv->ops;
-     sc_file_t  *tfile;
      int r;
      
      if (drvdata->selected == SELECT_MF) {
@@ -327,11 +328,10 @@ static int jcop_read_binary(sc_card_t *card, unsigned int idx,
 	  if (idx + count > 128) {
 	       count=128-idx;
 	  }
-	  r = iso_ops->select_file(card, &drvdata->aid, &tfile);
+	  r = iso_ops->select_file(card, &drvdata->aid, NULL);
 	  if (r < 0) { /* no pkcs15 app, so return empty DIR. */
 	       memset(buf, 0, count);
 	  } else {
-	       sc_file_free(tfile);
 	       memcpy(buf, (u8 *)(ef_dir_contents + idx), count);
 	  }
 	  return count;
@@ -343,7 +343,6 @@ static int jcop_list_files(sc_card_t *card, u8 *buf, size_t buflen) {
      struct jcop_private_data *drvdata=DRVDATA(card);
      struct sc_card_driver *iso_drv = sc_get_iso7816_driver();
      const struct sc_card_operations *iso_ops = iso_drv->ops;
-     sc_file_t  *tfile;
      int r;
 
      if (drvdata->selected == SELECT_MF) {
@@ -353,11 +352,10 @@ static int jcop_list_files(sc_card_t *card, u8 *buf, size_t buflen) {
 	  if (buflen < 4)
 	       return 2;
 	  /* AppDF only exists if applet is selectable */
-	  r = iso_ops->select_file(card, &drvdata->aid, &tfile);
+	  r = iso_ops->select_file(card, &drvdata->aid, NULL);
 	  if (r < 0) { 
 	       return 2;
 	  } else {
-	       sc_file_free(tfile);
 	       memcpy(buf+2, "\x50\x15", 2);
 	       return 4;
 	  }
@@ -642,7 +640,7 @@ static int jcop_set_security_env(sc_card_t *card,
                 if (tmp.algorithm_flags & SC_ALGORITHM_RSA_HASH_MD5)
                         tmp.algorithm_ref |= 0x20;
 
-		memcpy(env, &tmp, sizeof(struct sc_security_env));
+		memcpy((sc_security_env_t *) env, &tmp, sizeof(struct sc_security_env));
 	}
 	
         sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0xC1, 0);
@@ -657,9 +655,9 @@ static int jcop_set_security_env(sc_card_t *card,
 	     return SC_ERROR_INVALID_ARGUMENTS;
         }
         apdu.le = 0;
-        if (!env->flags & SC_SEC_ENV_ALG_REF_PRESENT)
+        if (!(env->flags & SC_SEC_ENV_ALG_REF_PRESENT))
 	     return SC_ERROR_INVALID_ARGUMENTS;
-        if (!env->flags & SC_SEC_ENV_FILE_REF_PRESENT)
+        if (!(env->flags & SC_SEC_ENV_FILE_REF_PRESENT))
 	     return SC_ERROR_INVALID_ARGUMENTS;
         if (env->flags & SC_SEC_ENV_KEY_REF_PRESENT) {
 	     if (env->key_ref_len > 1 || env->key_ref[0] != 0)
@@ -797,7 +795,6 @@ static int jcop_decipher(sc_card_t *card,
 }
  
 static int jcop_generate_key(sc_card_t *card, struct sc_cardctl_jcop_genkey *a) {
-     int modlen;
      int r;
      sc_apdu_t apdu;
      u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
@@ -877,7 +874,6 @@ static int jcop_generate_key(sc_card_t *card, struct sc_cardctl_jcop_genkey *a) 
      if (rbuf[0] != 0x4) {
 	  return SC_ERROR_INVALID_DATA;
      }
-     modlen=rbuf[1] * 32;
      if (a->pubkey_len < rbuf[1])
 	  return SC_ERROR_BUFFER_TOO_SMALL;
      a->pubkey_len=rbuf[1] * 4;

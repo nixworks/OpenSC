@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <assert.h>
 #include <string.h>
@@ -215,7 +217,7 @@ static int westcos_init(sc_card_t * card)
 	card->drv_data = malloc(sizeof(priv_data_t));
 	if (card->drv_data == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
-	memset(card->drv_data, 0, sizeof(card->drv_data));
+	memset(card->drv_data, 0, sizeof(priv_data_t));
 	
 	priv_data = (priv_data_t *) card->drv_data;
 
@@ -359,13 +361,7 @@ static int westcos_process_fci(sc_card_t * card, sc_file_t * file,
 	if (tag != NULL && taglen > 0 && taglen <= 16) {
 		memcpy(file->name, tag, taglen);
 		file->namelen = taglen;
-		{
-			char tbuf[128];
-			sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-				file->name, file->namelen, tbuf, sizeof(tbuf));
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				"  File name: %s\n", tbuf);
-		}
+		sc_log_hex(card->ctx, "  File name", file->name, file->namelen);
 	}
 	if (file->type == SC_FILE_TYPE_DF) {
 		tag = sc_asn1_find_tag(ctx, p, len, 0x85, &taglen);
@@ -533,6 +529,7 @@ static int westcos_create_file(sc_card_t *card, struct sc_file *file)
 		break;
 	case SC_FILE_TYPE_INTERNAL_EF:
 		buf[0] |= 0x80;
+		/* fall through */
 	case SC_FILE_TYPE_WORKING_EF:
 		switch (file->ef_structure) {
 		case SC_FILE_EF_TRANSPARENT:
@@ -597,7 +594,7 @@ static int westcos_create_file(sc_card_t *card, struct sc_file *file)
 		p2 = (file->id) % 256;
 	}
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		"create file %s, id %X size %d\n",
+		 "create file %s, id %X size %"SC_FORMAT_LEN_SIZE_T"u\n",
 		 file->path.value, file->id, file->size);
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0xE0, p1, p2);
 	apdu.cla = 0x80;
@@ -863,7 +860,7 @@ static int westcos_card_ctl(sc_card_t * card, unsigned long cmd, void *ptr)
 	if (card == NULL)
 		return SC_ERROR_INVALID_ARGUMENTS;
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		"westcos_card_ctl cmd = %X\n", cmd);
+		"westcos_card_ctl cmd = %lX\n", cmd);
 	priv_data = (priv_data_t *) card->drv_data;
 	switch (cmd) {
 	case SC_CARDCTL_GET_DEFAULT_KEY:
@@ -975,7 +972,7 @@ static int westcos_card_ctl(sc_card_t * card, unsigned long cmd, void *ptr)
 		data.pin1.data = priv_data->default_key.key_value;
 		return sc_pin_cmd(card, &data, NULL);
 	case SC_CARDCTL_WESTCOS_CHANGE_KEY:
-		if (1) {
+		{
 			int lrc;
 			u8 temp[7];
 			sc_changekey_t *ck = (sc_changekey_t *) ptr;
@@ -1095,20 +1092,31 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 				 size_t outlen)
 {
 	int r;
+	sc_file_t *keyfile = NULL;
+#ifdef ENABLE_OPENSSL
 	int idx = 0;
 	u8 buf[180];
-	sc_file_t *keyfile = sc_file_new();
 	priv_data_t *priv_data = NULL;
 	int pad;
-#ifdef ENABLE_OPENSSL
 	RSA *rsa = NULL;
 	BIO *mem = BIO_new(BIO_s_mem());
 #endif
 
 	if (card == NULL)
 		return SC_ERROR_INVALID_ARGUMENTS;
+
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		"westcos_sign_decipher outlen=%d\n", outlen);
+		 "westcos_sign_decipher outlen=%"SC_FORMAT_LEN_SIZE_T"u\n",
+		 outlen);
+
+#ifndef ENABLE_OPENSSL
+	r = SC_ERROR_NOT_SUPPORTED;
+#else
+	if (mem == NULL || card->drv_data == NULL) {
+		r = SC_ERROR_OUT_OF_MEMORY;
+		goto out;
+	}
+
 	priv_data = (priv_data_t *) card->drv_data;
 
 	if(priv_data->flags & RSA_CRYPTO_COMPONENT)
@@ -1134,14 +1142,6 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 		r = apdu.resplen;
 		goto out2;
 	}
-	
-#ifndef ENABLE_OPENSSL
-	r = SC_ERROR_NOT_SUPPORTED;
-#else
-	if (keyfile == NULL || mem == NULL || priv_data == NULL) {
-		r = SC_ERROR_OUT_OF_MEMORY;
-		goto out;
-	}
 	if ((priv_data->env.flags) & SC_ALGORITHM_RSA_PAD_PKCS1)
 		pad = RSA_PKCS1_PADDING;
 
@@ -1153,7 +1153,7 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 		goto out;
 	}
 	r = sc_select_file(card, &(priv_data->env.file_ref), &keyfile);
-	if (r)
+	if (r || !keyfile)
 		goto out;
 
 	do {
@@ -1172,13 +1172,14 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 	BIO_set_mem_eof_return(mem, -1);
 	if (!d2i_RSAPrivateKey_bio(mem, &rsa)) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-			"RSA key invalid, %d\n", ERR_get_error());
+			"RSA key invalid, %lu\n", ERR_get_error());
 		r = SC_ERROR_UNKNOWN;
 		goto out;
 	}
 
 	/* pkcs11 reset openssl functions */
-	rsa->meth = RSA_PKCS1_SSLeay();
+	RSA_set_method(rsa, RSA_PKCS1_OpenSSL());
+
 	if ((size_t)RSA_size(rsa) > outlen) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Buffer too small\n");
 		r = SC_ERROR_OUT_OF_MEMORY;
@@ -1194,7 +1195,7 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 
 #endif
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				"Decipher error %d\n", ERR_get_error());
+				"Decipher error %lu\n", ERR_get_error());
 			r = SC_ERROR_UNKNOWN;
 			goto out;
 		}
@@ -1210,7 +1211,7 @@ static int westcos_sign_decipher(int mode, sc_card_t *card,
 
 #endif
 			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-				"Signature error %d\n", ERR_get_error());
+				"Signature error %lu\n", ERR_get_error());
 			r = SC_ERROR_UNKNOWN;
 			goto out;
 		}
@@ -1231,10 +1232,9 @@ out:
 		BIO_free(mem);
 	if (rsa)
 		RSA_free(rsa);
-#endif /* ENABLE_OPENSSL */
 out2:
-	if (keyfile)
-		sc_file_free(keyfile);
+#endif /* ENABLE_OPENSSL */
+	sc_file_free(keyfile);
 	return r;
 }
 

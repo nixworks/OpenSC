@@ -20,7 +20,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -391,11 +393,12 @@ static int atrust_acos_select_file(struct sc_card *card,
 		pbuf[0] = '\0';
 
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		"current path (%s, %s): %s (len: %u)\n",
-		(card->cache.current_path.type==SC_PATH_TYPE_DF_NAME?"aid":"path"),
-		(card->cache.valid?"valid":"invalid"), pbuf,
-		card->cache.current_path.len);
-  
+		 "current path (%s, %s): %s (len: %"SC_FORMAT_LEN_SIZE_T"u)\n",
+		 card->cache.current_path.type == SC_PATH_TYPE_DF_NAME ?
+		 "aid" : "path",
+		 card->cache.valid ? "valid" : "invalid", pbuf,
+		 card->cache.current_path.len);
+
 	memcpy(path, in_path->value, in_path->len);
 	pathlen = in_path->len;
 

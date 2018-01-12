@@ -1,7 +1,7 @@
 /*
  * eidenv.c: EstEID utility
  *
- * Copyright (C) 2004 Martin Paljak <martin@paljak.pri.ee>
+ * Copyright (C) 2004 Martin Paljak <martin@martinpaljak.net>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,6 +23,8 @@
 #include <stdio.h>
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <process.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +158,8 @@ static void do_esteid(sc_card_t *card)
 		/* print the counters */
 		for (i = 1; i <= 4; i++) {
 			r = sc_read_record(card, i, buff, 128, SC_RECORD_BY_REC_NR);
+			if (r < 0)
+				goto out;
 			key_used[i - 1] = 0xffffff - ((unsigned char) buff[0xc] * 65536
 									+ (unsigned char) buff[0xd] * 256
 									+ (unsigned char) buff[0xe]);

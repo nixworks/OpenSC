@@ -18,11 +18,14 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <ctype.h>
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -34,7 +37,9 @@ int sc_decipher(sc_card_t *card,
 {
 	int r;
 
-	assert(card != NULL && crgram != NULL && out != NULL);
+	if (card == NULL || crgram == NULL || out == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (card->ops->decipher == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
@@ -48,7 +53,9 @@ int sc_compute_signature(sc_card_t *card,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (card->ops->compute_signature == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
@@ -62,7 +69,9 @@ int sc_set_security_env(sc_card_t *card,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (card->ops->set_security_env == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
@@ -74,7 +83,9 @@ int sc_restore_security_env(sc_card_t *card, int se_num)
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (card->ops->restore_security_env == NULL)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_NOT_SUPPORTED);
@@ -153,7 +164,9 @@ int sc_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
 {
 	int r;
 
-	assert(card != NULL);
+	if (card == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (card->ops->pin_cmd) {
 		r = card->ops->pin_cmd(card, data, tries_left);
@@ -211,7 +224,7 @@ int sc_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data,
  * PIN buffers are allways 16 nibbles (8 bytes) and look like this:
  *   0x2 + len + pin_in_BCD + paddingnibbles
  * in which the paddingnibble = 0xF
- * E.g. if PIN = 12345, then sbuf = {0x24, 0x12, 0x34, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF}
+ * E.g. if PIN = 12345, then sbuf = {0x25, 0x12, 0x34, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF}
  * E.g. if PIN = 123456789012, then sbuf = {0x2C, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0xFF}
  * Reference: Global Platform - Card Specification - version 2.0.1' - April 7, 2000
  */
@@ -231,7 +244,7 @@ int sc_build_pin(u8 *buf, size_t buflen, struct sc_pin_cmd_pin *pin, int pad)
 			if (pin->data[i] < '0' || pin->data[i] > '9')
 				return SC_ERROR_INVALID_ARGUMENTS;
 		}
-		buf[0] = 0x20 | pin_len;
+		buf[0] = 0x20 | (u8) pin_len;
 		buf++;
 		buflen--;
 	}
@@ -246,6 +259,9 @@ int sc_build_pin(u8 *buf, size_t buflen, struct sc_pin_cmd_pin *pin, int pad)
 		if (pin_len > 2 * buflen)
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		for (i = j = 0; j < pin_len; j++) {
+			if (!isdigit(pin->data[j])) {
+				return SC_ERROR_INVALID_DATA;
+			}
 			buf[i] <<= 4;
 			buf[i] |= pin->data[j] & 0xf;
 			if (j & 1)

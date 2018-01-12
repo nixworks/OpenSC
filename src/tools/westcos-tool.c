@@ -33,6 +33,7 @@
 #include <openssl/x509v3.h>
 #include <openssl/bn.h>
 
+#include "libopensc/sc-ossl-compat.h"
 #include "libopensc/opensc.h"
 #include "libopensc/errors.h"
 #include "libopensc/pkcs15.h"
@@ -90,8 +91,6 @@ static int finalize = 0;
 static int install_pin = 0;
 static int overwrite = 0;
 
-static char *pin = NULL;
-static char *puk = NULL;
 static char *cert = NULL;
 
 static int keylen = 0;
@@ -102,17 +101,18 @@ static int unlock = 0;
 static char *get_filename = NULL;
 static char *put_filename = NULL;
 
-static int do_convert_bignum(sc_pkcs15_bignum_t *dst, BIGNUM *src)
+static int do_convert_bignum(sc_pkcs15_bignum_t *dst, const BIGNUM *src)
 {
 	if (src == 0) return 0;
 	dst->len = BN_num_bytes(src);
 	dst->data = malloc(dst->len);
-	BN_bn2bin(src, dst->data);
+	if (!dst->data) return 0;
+	if (!BN_bn2bin(src, dst->data)) return 0;
 	return 1;
 }
 
 static int	charge = 0;
-static void print_openssl_erreur(void)
+static void print_openssl_error(void)
 {
 	long r;
 
@@ -126,7 +126,7 @@ static void print_openssl_erreur(void)
 		printf("%s\n", ERR_error_string(r, NULL));
 }
 
-static int verify_pin(sc_card_t *card, int pin_reference, char *pin_value)
+static int verify_pin(sc_card_t *card, int pin_reference, const char *pin_value)
 {
 	int r, tries_left = -1;
 	struct sc_pin_cmd_data data;
@@ -178,8 +178,8 @@ static int verify_pin(sc_card_t *card, int pin_reference, char *pin_value)
 
 static int change_pin(sc_card_t *card,
 		int pin_reference,
-		char *pin_value1,
-		char *pin_value2)
+		const char *pin_value1,
+		const char *pin_value2)
 {
 	int r, tries_left = -1;
 	struct sc_pin_cmd_data data;
@@ -236,8 +236,8 @@ static int change_pin(sc_card_t *card,
 
 static int unlock_pin(sc_card_t *card,
 			int pin_reference,
-			char *puk_value,
-			char *pin_value)
+			const char *puk_value,
+			const char *pin_value)
 {
 	int r, tries_left = -1;
 	struct sc_pin_cmd_data data;
@@ -259,7 +259,7 @@ static int unlock_pin(sc_card_t *card,
 	}
 	else
 	{
-		if(pin == NULL || puk == NULL)
+		if(pin_value == NULL || puk_value == NULL)
 		{
 			return SC_ERROR_INVALID_ARGUMENTS;
 		}
@@ -302,10 +302,10 @@ static int cert2der(X509 *cert, u8 **value)
 	return len;
 }
 
-static int creation_fichier_cert(sc_card_t *card)
+static int create_file_cert(sc_card_t *card)
 {
 	int r;
-	int size;
+	int size = 0;
 	sc_path_t path;
 	sc_file_t *file = NULL;
 
@@ -313,12 +313,13 @@ static int creation_fichier_cert(sc_card_t *card)
 	r = sc_select_file(card, &path, &file);
 	if(r) goto out;
 
-	size = (file->size) - 32;
-
 	if(file)
 	{
+		size = (file->size) - 32;
 		sc_file_free(file);
 		file = NULL;
+	} else {
+		size = 2048;
 	}
 
 	sc_format_path("0002", &path);
@@ -370,6 +371,8 @@ int main(int argc, char *argv[])
 	RSA	*rsa = NULL;
 	BIGNUM	*bn = NULL;
 	BIO	*mem = NULL;
+	static const char *pin = NULL;
+	static const char *puk = NULL;
 
 	while (1)
 	{
@@ -400,10 +403,10 @@ int main(int argc, char *argv[])
 				install_pin = 1;
 				break;
 			case 'x':
-				pin = optarg;
+				util_get_pin(optarg, &pin);
 				break;
 			case 'y':
-				puk = optarg;
+				util_get_pin(optarg, &puk);
 				break;
 			case 'n':
 				new_pin = 1;
@@ -616,7 +619,7 @@ int main(int argc, char *argv[])
 			goto out;
 		}
 
-		rsa->meth = RSA_PKCS1_SSLeay();
+		RSA_set_method(rsa, RSA_PKCS1_OpenSSL());
 
 		if(!i2d_RSAPrivateKey_bio(mem, rsa))
 		{
@@ -654,8 +657,9 @@ int main(int argc, char *argv[])
 
 			file->path = path;
 
-			printf("File key creation %s, size %zd.\n", file->path.value,
-				file->size);
+			printf("File key creation %s, size %"SC_FORMAT_LEN_SIZE_T"d.\n",
+			       file->path.value,
+			       file->size);
 
 			r = sc_create_file(card, file);
 			if(r) goto out;
@@ -670,24 +674,31 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		printf("Private key length is %zd\n", lg);
+		printf("Private key length is %"SC_FORMAT_LEN_SIZE_T"d\n", lg);
 
 		printf("Write private key.\n");
 		r = sc_update_binary(card,0,pdata,lg,0);
 		if(r<0) goto out;
 		printf("Private key correctly written.\n");
 
-		r = creation_fichier_cert(card);
+		r = create_file_cert(card);
 		if(r) goto out;
 
-		if (!do_convert_bignum(&dst->modulus, rsa->n)
-		 || !do_convert_bignum(&dst->exponent, rsa->e))
-			goto out;
+		{
+			const BIGNUM *rsa_n, *rsa_e;
+
+			RSA_get0_key(rsa, &rsa_n, &rsa_e, NULL);
+
+			if (!do_convert_bignum(&dst->modulus, rsa_n)
+			 || !do_convert_bignum(&dst->exponent, rsa_e))
+				goto out;
+
+		}
 
 		r = sc_pkcs15_encode_pubkey(ctx, &key, &pdata, &lg);
 		if(r) goto out;
 
-		printf("Public key length %zd\n", lg);
+		printf("Public key length %"SC_FORMAT_LEN_SIZE_T"d\n", lg);
 
 		sc_format_path("3F000002", &path);
 		r = sc_select_file(card, &path, NULL);
@@ -717,7 +728,7 @@ int main(int argc, char *argv[])
 		BIO_free(bio);
 		if (xp == NULL)
 		{
-			print_openssl_erreur();
+			print_openssl_error();
 			goto out;
 		}
 		else
@@ -728,7 +739,7 @@ int main(int argc, char *argv[])
 			r = sc_select_file(card, &path, NULL);
 			if(r) goto out;
 
-			/* FIXME: verifier taille fichier compatible... */
+			/* FIXME: verify if the file has a compatible size... */
 			printf("Write certificate %s.\n", cert);
 
 			r = sc_update_binary(card,0,pdata,lg,0);
@@ -853,14 +864,18 @@ int main(int argc, char *argv[])
 		b = malloc(file->size);
 		if(b == NULL)
 		{
-				printf("Not enougth memory.\n");
-				goto out;
+			printf("Not enougth memory.\n");
+			goto out;
 		}
 
 		memset(b, 0, file->size);
 
 		fp = fopen(put_filename, "rb");
-		fread(b, 1, file->size, fp);
+		if (fp == NULL || file->size != fread(b, 1, file->size, fp))
+		{
+			printf("could not read %s.\n", put_filename);
+			goto out;
+		}
 		fclose(fp);
 
 		r = sc_update_binary(card, 0, b, file->size, 0);
@@ -903,8 +918,7 @@ out:
 		sc_disconnect_card(card);
 	}
 
-	if (ctx)
-		sc_release_context(ctx);
+	sc_release_context(ctx);
 
 	return EXIT_SUCCESS;
 }

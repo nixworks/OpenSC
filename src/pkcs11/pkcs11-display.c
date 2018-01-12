@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Mathias Brossard <mathias.brossard@idealx.com>
+ * Copyright (C) 2015 Mathias Brossard <mathias@brossard.org>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,6 +18,9 @@
  */
 
 #include "config.h"
+#if !defined(_MSC_VER) || _MSC_VER >= 1800
+#include <inttypes.h>
+#endif
 #include <string.h>
 
 #ifdef ENABLE_OPENSSL
@@ -90,10 +93,18 @@ buf_spec(CK_VOID_PTR buf_addr, CK_ULONG buf_len)
 {
 	static char ret[64];
 
+#if !defined(_MSC_VER) || _MSC_VER >= 1800
+	const size_t prwidth = sizeof(CK_VOID_PTR) * 2;
+
+	sprintf(ret, "%0*"PRIxPTR" / %lu", (int) prwidth, (uintptr_t) buf_addr,
+		buf_len);
+#else
 	if (sizeof(CK_VOID_PTR) == 4)
-		sprintf(ret, "%08lx / %ld", (unsigned long) buf_addr, (CK_LONG) buf_len);
+		sprintf(ret, "%08lx / %lu", (unsigned long) buf_addr, buf_len);
 	else
-		sprintf(ret, "%016lx / %ld", (unsigned long) buf_addr, (CK_LONG) buf_len);
+		sprintf(ret, "%016llx / %lu", (unsigned long long) buf_addr,
+			buf_len);
+#endif
 
 	return ret;
 }
@@ -275,7 +286,12 @@ static enum_specs ck_key_s[] = {
   { CKK_BATON         , "CKK_BATON          " },
   { CKK_JUNIPER       , "CKK_JUNIPER        " },
   { CKK_CDMF          , "CKK_CDMF           " },
-  { CKK_AES           , "CKK_AES            " }
+  { CKK_AES           , "CKK_AES            " },
+  { CKK_BLOWFISH      , "CKK_BLOWFISH       " },
+  { CKK_TWOFISH       , "CKK_TWOFISH        " },
+  { CKK_GOSTR3410     , "CKK_GOSTR3410      " },
+  { CKK_GOSTR3411     , "CKK_GOSTR3411      " },
+  { CKK_GOST28147     , "CKK_GOST28147      " }
 };
 
 static enum_specs ck_mec_s[] = {
@@ -479,10 +495,38 @@ static enum_specs ck_mec_s[] = {
   { CKM_AES_MAC                  , "CKM_AES_MAC                  " },
   { CKM_AES_MAC_GENERAL          , "CKM_AES_MAC_GENERAL          " },
   { CKM_AES_CBC_PAD              , "CKM_AES_CBC_PAD              " },
+  { CKM_AES_CTR                  , "CKM_AES_CTR                  " },
+  { CKM_AES_GCM                  , "CKM_AES_GCM                  " },
+  { CKM_AES_CCM                  , "CKM_AES_CCM                  " },
+  { CKM_AES_CTS                  , "CKM_AES_CTS                  " },
+  { CKM_BLOWFISH_KEY_GEN         , "CKM_BLOWFISH_KEY_GEN         " },
+  { CKM_BLOWFISH_CBC             , "CKM_BLOWFISH_CBC             " },
+  { CKM_TWOFISH_KEY_GEN          , "CKM_TWOFISH_KEY_GEN          " },
+  { CKM_TWOFISH_CBC              , "CKM_TWOFISH_CBC              " },
+  { CKM_GOSTR3410_KEY_PAIR_GEN   , "CKM_GOSTR3410_KEY_PAIR_GEN   " },
+  { CKM_GOSTR3410                , "CKM_GOSTR3410                " },
+  { CKM_GOSTR3410_WITH_GOSTR3411 , "CKM_GOSTR3410_WITH_GOSTR3411 " },
+  { CKM_GOSTR3410_KEY_WRAP       , "CKM_GOSTR3410_KEY_WRAP       " },
+  { CKM_GOSTR3410_DERIVE         , "CKM_GOSTR3410_DERIVE         " },
+  { CKM_GOSTR3411                , "CKM_GOSTR3411                " },
+  { CKM_GOSTR3411_HMAC           , "CKM_GOSTR3411_HMAC           " },
+  { CKM_GOST28147_KEY_GEN        , "CKM_GOST28147_KEY_GEN        " },
+  { CKM_GOST28147_ECB            , "CKM_GOST28147_ECB            " },
+  { CKM_GOST28147                , "CKM_GOST28147                " },
+  { CKM_GOST28147_MAC            , "CKM_GOST28147_MAC            " },
+  { CKM_GOST28147_KEY_WRAP       , "CKM_GOST28147_KEY_WRAP       " },
   { CKM_DSA_PARAMETER_GEN        , "CKM_DSA_PARAMETER_GEN        " },
   { CKM_DH_PKCS_PARAMETER_GEN    , "CKM_DH_PKCS_PARAMETER_GEN    " },
   { CKM_X9_42_DH_PARAMETER_GEN   , "CKM_X9_42_DH_PARAMETER_GEN   " },
   { CKM_VENDOR_DEFINED           , "CKM_VENDOR_DEFINED           " }
+};
+
+static enum_specs ck_mgf_s[] = {
+  { CKG_MGF1_SHA1  , "CKG_MGF1_SHA1  " },
+  { CKG_MGF1_SHA224, "CKG_MGF1_SHA224" },
+  { CKG_MGF1_SHA256, "CKG_MGF1_SHA256" },
+  { CKG_MGF1_SHA384, "CKG_MGF1_SHA384" },
+  { CKG_MGF1_SHA512, "CKG_MGF1_SHA512" },
 };
 
 static enum_specs ck_err_s[] = {
@@ -594,6 +638,7 @@ enum_spec ck_types[] = {
   { KEY_T, ck_key_s, sizeof(ck_key_s) / SZ_SPECS, "CK_KEY_TYPE"         },
   { CRT_T, ck_crt_s, sizeof(ck_crt_s) / SZ_SPECS, "CK_CERTIFICATE_TYPE" },
   { MEC_T, ck_mec_s, sizeof(ck_mec_s) / SZ_SPECS, "CK_MECHANISM_TYPE"   },
+  { MGF_T, ck_mgf_s, sizeof(ck_mgf_s) / SZ_SPECS, "CK_RSA_PKCS_MGF_TYPE"},
   { USR_T, ck_usr_s, sizeof(ck_usr_s) / SZ_SPECS, "CK_USER_TYPE"        },
   { STA_T, ck_sta_s, sizeof(ck_sta_s) / SZ_SPECS, "CK_STATE"        },
   { RV_T,  ck_err_s, sizeof(ck_err_s) / SZ_SPECS, "CK_RV"               },
@@ -682,6 +727,9 @@ type_spec ck_attribute_specs[] = {
   { CKA_WRAP_WITH_TRUSTED , "CKA_WRAP_WITH_TRUSTED ", print_generic, NULL },
   { CKA_WRAP_TEMPLATE     , "CKA_WRAP_TEMPLATE    ", print_generic, NULL },
   { CKA_UNWRAP_TEMPLATE   , "CKA_UNWRAP_TEMPLATE  ", print_generic, NULL },
+  { CKA_GOSTR3410_PARAMS  , "CKA_GOSTR3410_PARAMS ", print_generic, NULL },
+  { CKA_GOSTR3411_PARAMS  , "CKA_GOSTR3411_PARAMS ", print_generic, NULL },
+  { CKA_GOST28147_PARAMS  , "CKA_GOST28147_PARAMS ", print_generic, NULL },
   { CKA_HW_FEATURE_TYPE   , "CKA_HW_FEATURE_TYPE  ", print_generic, NULL },
   { CKA_RESET_ON_INIT     , "CKA_RESET_ON_INIT    ", print_generic, NULL },
   { CKA_HAS_RESET         , "CKA_HAS_RESET        ", print_generic, NULL },
@@ -891,7 +939,9 @@ print_mech_info(FILE *f, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR minfo)
 	const char *name = lookup_enum(MEC_T, type);
 	CK_ULONG known_flags = CKF_HW | CKF_ENCRYPT | CKF_DECRYPT | CKF_DIGEST |
 			CKF_SIGN | CKF_SIGN_RECOVER | CKF_VERIFY | CKF_VERIFY_RECOVER |
-			CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_WRAP | CKF_UNWRAP | CKF_DERIVE;
+			CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_WRAP | CKF_UNWRAP |
+			CKF_DERIVE | CKF_EC_F_P | CKF_EC_F_2M |CKF_EC_ECPARAMETERS |
+			CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS | CKF_EC_COMPRESS;
 
 	if (name)
 		fprintf(f, "%s : ", name);
@@ -901,7 +951,7 @@ print_mech_info(FILE *f, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR minfo)
 	fprintf(f, "min:%lu max:%lu flags:0x%lX ",
 			(unsigned long) minfo->ulMinKeySize,
 			(unsigned long) minfo->ulMaxKeySize, minfo->flags);
-	fprintf(f, "( %s%s%s%s%s%s%s%s%s%s%s%s%s%s)\n",
+	fprintf(f, "( %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s)\n",
 			(minfo->flags & CKF_HW)                ? "Hardware " : "",
 			(minfo->flags & CKF_ENCRYPT)           ? "Encrypt "  : "",
 			(minfo->flags & CKF_DECRYPT)           ? "Decrypt "  : "",
@@ -915,6 +965,12 @@ print_mech_info(FILE *f, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR minfo)
 			(minfo->flags & CKF_WRAP)              ? "Wrap "     : "",
 			(minfo->flags & CKF_UNWRAP)            ? "Unwrap "   : "",
 			(minfo->flags & CKF_DERIVE)            ? "Derive "   : "",
+            (minfo->flags & CKF_EC_F_P)            ? "F(P) "     : "",
+            (minfo->flags & CKF_EC_F_2M)           ? "F(2^M) "   : "",
+            (minfo->flags & CKF_EC_ECPARAMETERS)   ? "EcParams " : "",
+            (minfo->flags & CKF_EC_NAMEDCURVE)     ? "NamedCurve " : "",
+            (minfo->flags & CKF_EC_UNCOMPRESS)     ? "Uncompress " : "",
+            (minfo->flags & CKF_EC_COMPRESS)       ? "Compress " : "",
 			(minfo->flags & ~known_flags)          ? "Unknown "  : "");
 }
 

@@ -1,7 +1,21 @@
 /*
  * Function prototypes for pkcs15-init
  *
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef PKCS15_INIT_H
@@ -12,6 +26,9 @@ extern "C" {
 #endif
 
 #include "libopensc/pkcs15.h"
+
+#define DEFAULT_PRIVATE_KEY_LABEL "Private Key"
+#define DEFAULT_SECRET_KEY_LABEL  "Secret Key"
 
 #define SC_PKCS15INIT_X509_DIGITAL_SIGNATURE     0x0080UL
 #define SC_PKCS15INIT_X509_NON_REPUDIATION       0x0040UL
@@ -81,8 +98,8 @@ struct sc_pkcs15init_operations {
 	 * Create an empty key object.
 	 * @index is the number key objects already on the card.
 	 * @pin_info contains information on the PIN protecting
-	 * 		the key. NULL if the key should be
-	 * 		unprotected.
+	 *		the key. NULL if the key should be
+	 *		unprotected.
 	 * @key_info should be filled in by the function
 	 */
 	int	(*create_key)(struct sc_profile *, struct sc_pkcs15_card *,
@@ -145,9 +162,9 @@ struct sc_pkcs15init_operations {
 };
 
 /* Do not change these or reorder these */
-#define SC_PKCS15INIT_ID_STYLE_NATIVE 	0
-#define SC_PKCS15INIT_ID_STYLE_MOZILLA	1
-#define SC_PKCS15INIT_ID_STYLE_RFC2459	2
+#define SC_PKCS15INIT_ID_STYLE_NATIVE		0
+#define SC_PKCS15INIT_ID_STYLE_MOZILLA		1
+#define SC_PKCS15INIT_ID_STYLE_RFC2459		2
 
 #define SC_PKCS15INIT_SO_PIN		0
 #define SC_PKCS15INIT_SO_PUK		1
@@ -201,10 +218,12 @@ struct sc_pkcs15init_keyarg_gost_params {
 };
 
 struct sc_pkcs15init_prkeyargs {
+	/* TODO: member for private key algorithm: currently is used algorithm from 'key' member */
 	struct sc_pkcs15_id	id;
 	struct sc_pkcs15_id	auth_id;
-	const char *		label;
-	const char *		guid;
+	char *label;
+	unsigned char *guid;
+	size_t guid_len;
 	unsigned long		usage;
 	unsigned long		x509_usage;
 	unsigned int		flags;
@@ -212,7 +231,6 @@ struct sc_pkcs15init_prkeyargs {
 
 	union {
 		struct sc_pkcs15init_keyarg_gost_params gost;
-		struct sc_pkcs15_ec_parameters ec;
 	} params;
 
 	struct sc_pkcs15_prkey	key;
@@ -232,7 +250,6 @@ struct sc_pkcs15init_pubkeyargs {
 
 	union {
 		struct sc_pkcs15init_keyarg_gost_params gost;
-		struct sc_pkcs15_ec_parameters ec;
 	} params;
 
 	struct sc_pkcs15_pubkey	key;
@@ -255,14 +272,16 @@ struct sc_pkcs15init_skeyargs {
 	unsigned long           usage;
 	unsigned int		flags;
 	unsigned int		access_flags;
+	unsigned long		algorithm; /* User requested algorithm */
 	unsigned long		value_len; /* User requested length */
 
-	struct sc_pkcs15_der	data_value; /* Wrong name: is not DER encoded */
+	struct sc_pkcs15_skey	key;
 };
 
 struct sc_pkcs15init_certargs {
 	struct sc_pkcs15_id	id;
 	const char *		label;
+	int update;
 
 	unsigned long		x509_usage;
 	unsigned char		authority;
@@ -275,6 +294,7 @@ struct sc_pkcs15init_certargs {
 
 extern struct	sc_pkcs15_object *sc_pkcs15init_new_object(int, const char *,
 				struct sc_pkcs15_id *, void *);
+extern void		sc_pkcs15init_free_object(struct sc_pkcs15_object *);
 extern void	sc_pkcs15init_set_callbacks(struct sc_pkcs15init_callbacks *);
 extern int	sc_pkcs15init_bind(struct sc_card *, const char *, const char *,
 				struct sc_app_info *app_info, struct sc_profile **);
@@ -298,6 +318,10 @@ extern int	sc_pkcs15init_generate_key(struct sc_pkcs15_card *,
 				struct sc_pkcs15init_keygen_args *,
 				unsigned int keybits,
 				struct sc_pkcs15_object **);
+extern int	sc_pkcs15init_generate_secret_key(struct sc_pkcs15_card *,
+				struct sc_profile *,
+				struct sc_pkcs15init_skeyargs *,
+				struct sc_pkcs15_object **);
 extern int	sc_pkcs15init_store_private_key(struct sc_pkcs15_card *,
 				struct sc_profile *,
 				struct sc_pkcs15init_prkeyargs *,
@@ -310,6 +334,10 @@ extern int	sc_pkcs15init_store_split_key(struct sc_pkcs15_card *,
 extern int	sc_pkcs15init_store_public_key(struct sc_pkcs15_card *,
 				struct sc_profile *,
 				struct sc_pkcs15init_pubkeyargs *,
+				struct sc_pkcs15_object **);
+extern int	sc_pkcs15init_store_secret_key(struct sc_pkcs15_card *,
+				struct sc_profile *,
+				struct sc_pkcs15init_skeyargs *,
 				struct sc_pkcs15_object **);
 extern int	sc_pkcs15init_store_certificate(struct sc_pkcs15_card *,
 				struct sc_profile *,
@@ -369,18 +397,14 @@ extern int	sc_pkcs15init_delete_by_path(struct sc_profile *,
 				struct sc_pkcs15_card *, const struct sc_path *);
 extern int	sc_pkcs15init_update_any_df(struct sc_pkcs15_card *, struct sc_profile *,
 			struct sc_pkcs15_df *, int);
+extern int	sc_pkcs15init_select_intrinsic_id(struct sc_pkcs15_card *, struct sc_profile *,
+			int, struct sc_pkcs15_id *, void *);
 
 /* Erasing the card structure via rm -rf */
 extern int	sc_pkcs15init_erase_card_recursively(struct sc_pkcs15_card *,
 				struct sc_profile *);
 extern int	sc_pkcs15init_rmdir(struct sc_pkcs15_card *, struct sc_profile *,
 				struct sc_file *);
-
-/* Helper function for CardOS */
-extern int	sc_pkcs15init_requires_restrictive_usage(
-				struct sc_pkcs15_card *,
-				struct sc_pkcs15init_prkeyargs *,
-				unsigned int);
 
 extern int	sc_pkcs15_create_pin_domain(struct sc_profile *, struct sc_pkcs15_card *,
 				const struct sc_pkcs15_id *, struct sc_file **);
@@ -416,6 +440,8 @@ extern struct sc_pkcs15init_operations *sc_pkcs15init_get_iasecc_ops(void);
 extern struct sc_pkcs15init_operations *sc_pkcs15init_get_piv_ops(void);
 extern struct sc_pkcs15init_operations *sc_pkcs15init_get_openpgp_ops(void);
 extern struct sc_pkcs15init_operations *sc_pkcs15init_get_sc_hsm_ops(void);
+extern struct sc_pkcs15init_operations *sc_pkcs15init_get_isoApplet_ops(void);
+extern struct sc_pkcs15init_operations *sc_pkcs15init_get_gids_ops(void);
 
 #ifdef __cplusplus
 }

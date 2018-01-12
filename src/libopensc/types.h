@@ -35,6 +35,7 @@ typedef unsigned char u8;
 #define SC_MAX_EXT_APDU_BUFFER_SIZE	65538
 #define SC_MAX_PIN_SIZE			256 /* OpenPGP card has 254 max */
 #define SC_MAX_ATR_SIZE			33
+#define SC_MAX_UID_SIZE			10
 #define SC_MAX_AID_SIZE			16
 #define SC_MAX_AID_STRING_SIZE		(SC_MAX_AID_SIZE * 2 + 3)
 #define SC_MAX_IIN_SIZE			10
@@ -73,6 +74,11 @@ struct sc_aid {
 
 struct sc_atr {
 	unsigned char value[SC_MAX_ATR_SIZE];
+	size_t len;
+};
+
+struct sc_uid {
+	unsigned char value[SC_MAX_UID_SIZE];
 	size_t len;
 };
 
@@ -142,6 +148,7 @@ struct sc_crt {
 #define SC_AC_SEN                       0x00000020 /* Security Environment. */
 #define SC_AC_SCB                       0x00000040 /* IAS/ECC SCB byte. */
 #define SC_AC_IDA                       0x00000080 /* PKCS#15 authentication ID */
+#define SC_AC_SESSION			0x00000100 /* Session PIN */
 
 #define SC_AC_UNKNOWN			0xFFFFFFFE
 #define SC_AC_NEVER			0xFFFFFFFF
@@ -177,8 +184,9 @@ struct sc_crt {
 #define SC_AC_OP_CREATE_EF		27
 #define SC_AC_OP_CREATE_DF		28
 #define SC_AC_OP_ADMIN			29
+#define SC_AC_OP_PIN_USE		30
 /* If you add more OPs here, make sure you increase SC_MAX_AC_OPS*/
-#define SC_MAX_AC_OPS			30
+#define SC_MAX_AC_OPS			31
 
 /* the use of SC_AC_OP_ERASE is deprecated, SC_AC_OP_DELETE should be used
  * instead  */
@@ -218,24 +226,31 @@ typedef struct sc_acl_entry {
 						(at least for SetCOS 4.4 */
 typedef struct sc_file {
 	struct sc_path path;
-	u8 name[16];	/* DF name */
+	unsigned char name[16];	/* DF name */
 	size_t namelen; /* length of DF name */
 
 	unsigned int type, ef_structure, status; /* See constant values defined above */
 	unsigned int shareable;                  /* true(1), false(0) according to ISO 7816-4:2005 Table 14 */
 	size_t size;	/* Size of file (in bytes) */
-	int id;		/* Short file id (2 bytes) */
+	int id;		/* file identifier (2 bytes) */
+	int sid;	/* short EF identifier (1 byte) */
 	struct sc_acl_entry *acl[SC_MAX_AC_OPS]; /* Access Control List */
 
 	int record_length; /* In case of fixed-length or cyclic EF */
 	int record_count;  /* Valid, if not transparent EF or DF */
 
-	u8 *sec_attr;
+	unsigned char *sec_attr;	/* security data in proprietary format. tag '86' */
 	size_t sec_attr_len;
-	u8 *prop_attr;
+
+	unsigned char *prop_attr;	/* proprietary information. tag '85'*/
 	size_t prop_attr_len;
-	u8 *type_attr;
+
+	unsigned char *type_attr;	/* file descriptor data. tag '82'.
+					   replaces the file's type information (DF, EF, ...) */
 	size_t type_attr_len;
+
+	unsigned char *encoded_content;	/* file's content encoded to be used in the file creation command */
+	size_t encoded_content_len;	/* size of file's encoded content in bytes */
 
 	unsigned int magic;
 } sc_file_t;
@@ -265,6 +280,8 @@ typedef struct sc_file {
  * returns 0x6Cxx (wrong length)
  */
 #define SC_APDU_FLAGS_NO_RETRY_WL	0x00000004UL
+/* APDU is from Secure Messaging  */
+#define SC_APDU_FLAGS_NO_SM		0x00000008UL
 
 #define SC_APDU_ALLOCATE_FLAG		0x01
 #define SC_APDU_ALLOCATE_FLAG_DATA	0x02
@@ -274,8 +291,8 @@ typedef struct sc_apdu {
 	int cse;			/* APDU case */
 	unsigned char cla, ins, p1, p2;	/* CLA, INS, P1 and P2 bytes */
 	size_t lc, le;			/* Lc and Le bytes */
-	unsigned char *data;		/* C-APDU data */
-	size_t datalen;			/* length of data in C-APDU */
+	const unsigned char *data;	/* S-APDU data */
+	size_t datalen;			/* length of data in S-APDU */
 	unsigned char *resp;		/* R-APDU data buffer */
 	size_t resplen;			/* in: size of R-APDU buffer,
 					 * out: length of data returned in R-APDU */

@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +33,7 @@
 #define MANU_ID		"Giesecke & Devrient GmbH"
 #define STARCERT	"StarCertV2201"
 
-int sc_pkcs15emu_starcert_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_starcert_init_ex(sc_pkcs15_card_t *, struct sc_aid *,sc_pkcs15emu_opt_t *);
 
 typedef struct cdata_st {
 	const char *label;
@@ -144,11 +146,11 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 	};
 
 	const prdata prkeys[] = {
-		{ "1", "DS key", 1024, USAGE_NONREP, "3F00DF01",
+		{ "01", "DS key", 1024, USAGE_NONREP, "3F00DF01",
 		  0x84, "99", SC_PKCS15_CO_FLAG_PRIVATE},
-		{ "3", "KE key", 1024, USAGE_KE, "3F00DF01",
+		{ "03", "KE key", 1024, USAGE_KE, "3F00DF01",
 		  0x85, NULL, SC_PKCS15_CO_FLAG_PRIVATE},
-		{ "4", "AUT key", 1024, USAGE_AUT, "3F00DF01",
+		{ "04", "AUT key", 1024, USAGE_AUT, "3F00DF01",
 		  0x82, NULL, SC_PKCS15_CO_FLAG_PRIVATE},
 		{ NULL, NULL, 0, 0, NULL, 0, NULL, 0}
 	};
@@ -162,6 +164,8 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 
 	/* get serial number */
 	r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+	if (r != SC_SUCCESS)
+		return SC_ERROR_INTERNAL;
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;
@@ -221,6 +225,7 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 		pin_info.attrs.pin.pad_char      = pins[i].pad_char;
 		sc_format_path(pins[i].path, &pin_info.path);
 		pin_info.tries_left    = -1;
+		pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 
 		strlcpy(pin_obj.label, pins[i].label, sizeof(pin_obj.label));
 		pin_obj.flags = pins[i].obj_flags;
@@ -268,6 +273,7 @@ static int sc_pkcs15emu_starcert_init(sc_pkcs15_card_t *p15card)
 }
 
 int sc_pkcs15emu_starcert_init_ex(sc_pkcs15_card_t *p15card,
+				  struct sc_aid *aid,
 				  sc_pkcs15emu_opt_t *opts)
 {
 

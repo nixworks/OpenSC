@@ -1,7 +1,7 @@
 /*
  * card-gpk: Driver for GPK 4000 cards
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 #ifdef ENABLE_OPENSSL	/* empty file without openssl */
 
 #include <stdlib.h>
@@ -218,47 +220,6 @@ gpk_finish(sc_card_t *card)
 	card->drv_data = NULL;
 	return 0;
 }
-
-/*
- * Error code handling for the GPK4000.
- * sc_check_sw doesn't seem to handle all of the
- * status words the GPK is capable of returning
- */
-#if 0
-static int
-gpk_check_sw(sc_card_t *card, u8 sw1, u8 sw2)
-{
-	unsigned short int	sw = (sw1 << 8) | sw2;
-
-	if ((sw & 0xFFF0) == 0x63C0) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "wrong PIN, %u tries left\n", sw&0xf);
-		return SC_ERROR_PIN_CODE_INCORRECT;
-	}
-
-	switch (sw) {
-	case 0x6400:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "wrong crypto context\n");
-		return SC_ERROR_OBJECT_NOT_VALID; /* XXX ??? */
-
-	/* The following are handled by iso7816_check_sw
-	 * but all return SC_ERROR_UNKNOWN_DATA_RECEIVED
-	 * XXX: fix in the iso driver? */
-	case 0x6983:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "PIN is blocked\n");
-		return SC_ERROR_PIN_CODE_INCORRECT;
-	case 0x6581:
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "out of space on card or file\n");
-		return SC_ERROR_OUT_OF_MEMORY;
-	case 0x6981:
-		return SC_ERROR_FILE_NOT_FOUND;
-	case 0x6A80:
-	case 0x6b00:
-		return SC_ERROR_INVALID_ARGUMENTS;
-	}
-
-	return iso7816_check_sw(card, sw1, sw2);
-}
-#endif
 
 /*
  * Select a DF/EF
@@ -770,7 +731,12 @@ gpk_compute_crycks(sc_card_t *card, sc_apdu_t *apdu,
 	u8		in[8], out[8], block[64];
 	unsigned int	len = 0, i;
 	int             r = SC_SUCCESS, outl;
-	EVP_CIPHER_CTX  ctx;
+	EVP_CIPHER_CTX  *ctx = NULL;
+
+	ctx = EVP_CIPHER_CTX_new();
+	if (ctx == NULL)
+		return SC_ERROR_INTERNAL;
+
 
 	/* Fill block with 0x00 and then with the data. */
 	memset(block, 0x00, sizeof(block));
@@ -787,16 +753,14 @@ gpk_compute_crycks(sc_card_t *card, sc_apdu_t *apdu,
 	/* Set IV */
 	memset(in, 0x00, 8);
 
-	EVP_CIPHER_CTX_init(&ctx);
-	EVP_EncryptInit_ex(&ctx, EVP_des_ede_cbc(), NULL, priv->key, in);
+	EVP_EncryptInit_ex(ctx, EVP_des_ede_cbc(), NULL, priv->key, in);
 	for (i = 0; i < len; i += 8) {
-		if (!EVP_EncryptUpdate(&ctx, out, &outl, &block[i], 8)) {
+		if (!EVP_EncryptUpdate(ctx, out, &outl, &block[i], 8)) {
 			r = SC_ERROR_INTERNAL;
 			break;
 		}
 	}
-	if (!EVP_CIPHER_CTX_cleanup(&ctx))
-		r = SC_ERROR_INTERNAL;
+	EVP_CIPHER_CTX_free(ctx);
 
 	memcpy((u8 *) (apdu->data + apdu->datalen), out + 5, 3);
 	apdu->datalen += 3;
@@ -922,25 +886,29 @@ gpk_set_filekey(const u8 *key, const u8 *challenge,
 		const u8 *r_rn, u8 *kats)
 {
 	int			r = SC_SUCCESS, outl;
-	EVP_CIPHER_CTX		ctx;
+	EVP_CIPHER_CTX		* ctx = NULL;
 	u8                      out[16];
 
 	memcpy(out, key+8, 8);
 	memcpy(out+8, key, 8);
 
-	EVP_CIPHER_CTX_init(&ctx);
-	EVP_EncryptInit_ex(&ctx, EVP_des_ede(), NULL, key, NULL);
-	if (!EVP_EncryptUpdate(&ctx, kats, &outl, r_rn+4, 8))
+	ctx = EVP_CIPHER_CTX_new();
+	if (ctx == NULL)
+		return SC_ERROR_INTERNAL;
+
+	EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, key, NULL);
+	if (!EVP_EncryptUpdate(ctx, kats, &outl, r_rn+4, 8))
 		r = SC_ERROR_INTERNAL;
-	if (!EVP_CIPHER_CTX_cleanup(&ctx))
+
+	if (!EVP_CIPHER_CTX_cleanup(ctx))
 		r = SC_ERROR_INTERNAL;
 	if (r == SC_SUCCESS) {
-		EVP_CIPHER_CTX_init(&ctx);
-		EVP_EncryptInit_ex(&ctx, EVP_des_ede(), NULL, out, NULL);
-		if (!EVP_EncryptUpdate(&ctx, kats+8, &outl, r_rn+4, 8))
+		EVP_CIPHER_CTX_init(ctx);
+		EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, out, NULL);
+		if (!EVP_EncryptUpdate(ctx, kats+8, &outl, r_rn+4, 8))
 			r = SC_ERROR_INTERNAL;
-		if (!EVP_CIPHER_CTX_cleanup(&ctx))
-			r = SC_ERROR_INTERNAL;
+	if (!EVP_CIPHER_CTX_cleanup(ctx))
+		r = SC_ERROR_INTERNAL;
 	}
 	memset(out, 0, sizeof(out));
 
@@ -949,15 +917,16 @@ gpk_set_filekey(const u8 *key, const u8 *challenge,
 	 * here? INVALID_ARGS doesn't seem quite right
 	 */
 	if (r == SC_SUCCESS) {
-		EVP_CIPHER_CTX_init(&ctx);
-		EVP_EncryptInit_ex(&ctx, EVP_des_ede(), NULL, kats, NULL);
-		if (!EVP_EncryptUpdate(&ctx, out, &outl, challenge, 8))
-			r = SC_ERROR_INTERNAL;
-		if (!EVP_CIPHER_CTX_cleanup(&ctx))
+		EVP_CIPHER_CTX_init(ctx);
+		EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, kats, NULL);
+		if (!EVP_EncryptUpdate(ctx, out, &outl, challenge, 8))
 			r = SC_ERROR_INTERNAL;
 		if (memcmp(r_rn, out+4, 4) != 0)
 			r = SC_ERROR_INVALID_ARGUMENTS;
 	}
+
+	if (ctx)
+	    EVP_CIPHER_CTX_free(ctx);
 
 	sc_mem_clear(out, sizeof(out));
 	return r;
@@ -980,7 +949,7 @@ gpk_select_key(sc_card_t *card, int key_sfi, const u8 *buf, size_t buflen)
 		return SC_ERROR_INVALID_ARGUMENTS;
 
 	/* now do the SelFk */
-	RAND_pseudo_bytes(rnd, sizeof(rnd));
+	RAND_bytes(rnd, sizeof(rnd));
 	memset(&apdu, 0, sizeof(apdu));
 	apdu.cla = 0x80;
 	apdu.cse = SC_APDU_CASE_4_SHORT;
@@ -1266,8 +1235,8 @@ gpk_compute_signature(sc_card_t *card, const u8 *data,
 
 	if (data_len > priv->sec_mod_len) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-			"Data length (%u) does not match key modulus %u.\n",
-			data_len, priv->sec_mod_len);
+			 "Data length (%"SC_FORMAT_LEN_SIZE_T"u) does not match key modulus %u.\n",
+			 data_len, priv->sec_mod_len);
 		return SC_ERROR_INTERNAL;
 	}
 	if (sizeof(cardsig) < priv->sec_mod_len)
@@ -1283,14 +1252,7 @@ gpk_compute_signature(sc_card_t *card, const u8 *data,
 	apdu.cse = SC_APDU_CASE_2_SHORT;
 	apdu.cla = 0x80;
 	apdu.ins = 0x86;
-#if 0
-	/* Don't know why I did this. It conflicts with the spec
-	 * (but it worked with the gpk4k, strange). --okir */
-	apdu.p1  = priv->sec_padding;
-	apdu.p2  = priv->sec_mod_len;
-#else
 	apdu.p2  = priv->sec_padding;
-#endif
 	apdu.resp= cardsig;
 	apdu.resplen = sizeof(cardsig);
 	apdu.le  = priv->sec_mod_len;
@@ -1327,8 +1289,8 @@ gpk_decipher(sc_card_t *card, const u8 *in, size_t inlen,
 
 	if (inlen != priv->sec_mod_len) {
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-			"Data length (%u) does not match key modulus %u.\n",
-			inlen, priv->sec_mod_len);
+			 "Data length (%"SC_FORMAT_LEN_SIZE_T"u) does not match key modulus %u.\n",
+			 inlen, priv->sec_mod_len);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
@@ -1555,19 +1517,18 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
 	unsigned int	n;
 	u8		temp[256];
 	int		r = SC_SUCCESS, outl;
-	EVP_CIPHER_CTX  ctx;
+	EVP_CIPHER_CTX  * ctx;
 
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "gpk_pkfile_load(fid=%04x, len=%d, datalen=%d)\n",
 			args->file->id, args->len, args->datalen);
 
-	if (0) {
-		char buf[2048];
+	ctx = EVP_CIPHER_CTX_new();
+	if (ctx == NULL)
+		return SC_ERROR_INTERNAL;
 
-		sc_hex_dump(card->ctx, SC_LOG_DEBUG_NORMAL,
-				args->data, args->datalen,
-				buf, sizeof(buf));
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Sending %d bytes (cleartext):\n%s",
-				args->datalen, buf);
+	if (0) {
+		sc_log_hex(card->ctx, "Sending (cleartext)",
+				args->data, args->datalen);
 	}
 
 	memset(&apdu, 0, sizeof(apdu));
@@ -1585,15 +1546,16 @@ gpk_pkfile_load(sc_card_t *card, struct sc_cardctl_gpk_pkload *args)
 		return SC_ERROR_SECURITY_STATUS_NOT_SATISFIED;
 	}
 
-	EVP_CIPHER_CTX_init(&ctx);
-	EVP_EncryptInit_ex(&ctx, EVP_des_ede(), NULL, priv->key, NULL);
+	EVP_EncryptInit_ex(ctx, EVP_des_ede(), NULL, priv->key, NULL);
 	for (n = 0; n < args->datalen; n += 8) {
-		if (!EVP_EncryptUpdate(&ctx, temp+n, &outl, args->data + n, 8)) {
+		if (!EVP_EncryptUpdate(ctx, temp+n, &outl, args->data + n, 8)) {
 			r = SC_ERROR_INTERNAL;
 			break;
 		}
 	}
-	if (!EVP_CIPHER_CTX_cleanup(&ctx) || r != SC_SUCCESS)
+	if (ctx)
+		EVP_CIPHER_CTX_free(ctx);
+	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;
 
 	apdu.data = temp;
@@ -1625,33 +1587,6 @@ gpk_get_default_key(sc_card_t *card, struct sc_cardctl_default_key *data)
 	}
 	return SC_ERROR_NO_DEFAULT_KEY;
 }
-
-/*
- * Get the maximum size of a session key the card is
- * willing to decrypt
- */
-#if 0
-static int
-gpk_max_session_key(sc_card_t *card)
-{
-	struct gpk_private_data *priv = DRVDATA(card);
-	sc_path_t	path;
-	u8		value;
-	int		r;
-
-	if (priv->max_session_key)
-		return priv->max_session_key;
-
-	/* GPK cards limit the amount of data they're willing
-	 * to RSA decrypt. This data is stored in EFMaxSessionKey */
-	sc_format_path("01000001", &path);
-	if ((r = sc_select_file(card, &path, NULL)) < 0
-	 || (r = sc_read_binary(card, 0, &value, 1, 0)) < 0)
-		return r;
-	priv->max_session_key = value;
-	return value;
-}
-#endif
 
 /*
  * GetInfo call

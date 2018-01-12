@@ -1,7 +1,21 @@
 /*
  * Generic handling of PKCS11 mechanisms
  *
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "config.h"
@@ -83,6 +97,9 @@ sc_pkcs11_get_mechanism_list(struct sc_pkcs11_card *p11card,
 	unsigned int n, count = 0;
 	int rv;
 
+	if (!p11card)
+		return CKR_TOKEN_NOT_PRESENT;
+
 	for (n = 0; n < p11card->nmechanisms; n++) {
 		if (!(mt = p11card->mechanisms[n]))
 			continue;
@@ -152,7 +169,7 @@ sc_pkcs11_md_init(struct sc_pkcs11_session *session,
 	int rv;
 
 	LOG_FUNC_CALLED(context);
-	if (!session || !session->slot || !(p11card = session->slot->card))
+	if (!session || !session->slot || !(p11card = session->slot->p11card))
 		LOG_FUNC_RETURN(context, CKR_ARGUMENTS_BAD);
 
 	/* See if we support this mechanism type */
@@ -231,11 +248,12 @@ sc_pkcs11_sign_init(struct sc_pkcs11_session *session, CK_MECHANISM_PTR pMechani
 	int rv;
 
 	LOG_FUNC_CALLED(context);
-	if (!session || !session->slot || !(p11card = session->slot->card))
+	if (!session || !session->slot || !(p11card = session->slot->p11card))
 		LOG_FUNC_RETURN(context, CKR_ARGUMENTS_BAD);
 
 	/* See if we support this mechanism type */
-	sc_log(context, "mechanism 0x%X, key-type 0x%X", pMechanism->mechanism, key_type);
+	sc_log(context, "mechanism 0x%lX, key-type 0x%lX",
+	       pMechanism->mechanism, key_type);
 	mt = sc_pkcs11_find_mechanism(p11card, pMechanism->mechanism, CKF_SIGN);
 	if (mt == NULL)
 		LOG_FUNC_RETURN(context, CKR_MECHANISM_INVALID);
@@ -412,7 +430,7 @@ sc_pkcs11_signature_update(sc_pkcs11_operation_t *operation,
 		LOG_FUNC_RETURN(context, CKR_DATA_LEN_RANGE);
 	memcpy(data->buffer + data->buffer_len, pPart, ulPartLen);
 	data->buffer_len += ulPartLen;
-	sc_log(context, "data length %li", data->buffer_len);
+	sc_log(context, "data length %u", data->buffer_len);
 	LOG_FUNC_RETURN(context, CKR_OK);
 }
 
@@ -425,7 +443,7 @@ sc_pkcs11_signature_final(sc_pkcs11_operation_t *operation,
 
 	LOG_FUNC_CALLED(context);
 	data = (struct signature_data *) operation->priv_data;
-	sc_log(context, "data length %li", data->buffer_len);
+	sc_log(context, "data length %u", data->buffer_len);
 	if (data->md) {
 		sc_pkcs11_operation_t	*md = data->md;
 		CK_ULONG len = sizeof(data->buffer);
@@ -438,7 +456,7 @@ sc_pkcs11_signature_final(sc_pkcs11_operation_t *operation,
 		data->buffer_len = len;
 	}
 
-	sc_log(context, "%li bytes to sign", data->buffer_len);
+	sc_log(context, "%u bytes to sign", data->buffer_len);
 	rv = data->key->ops->sign(operation->session, data->key, &operation->mechanism,
 			data->buffer, data->buffer_len, pSignature, pulSignatureLen);
 	LOG_FUNC_RETURN(context, rv);
@@ -515,7 +533,7 @@ sc_pkcs11_verif_init(struct sc_pkcs11_session *session, CK_MECHANISM_PTR pMechan
 	int rv;
 
 	if (!session || !session->slot
-	 || !(p11card = session->slot->card))
+	 || !(p11card = session->slot->p11card))
 		return CKR_ARGUMENTS_BAD;
 
 	/* See if we support this mechanism type */
@@ -590,7 +608,7 @@ done:
 }
 
 /*
- * Initialize a signature operation
+ * Initialize a verify operation
  */
 static CK_RV
 sc_pkcs11_verify_init(sc_pkcs11_operation_t *operation,
@@ -605,6 +623,18 @@ sc_pkcs11_verify_init(sc_pkcs11_operation_t *operation,
 
 	data->info = NULL;
 	data->key = key;
+
+	if (key->ops->can_do)   {
+		rv = key->ops->can_do(operation->session, key, operation->type->mech, CKF_SIGN);
+		if ((rv == CKR_OK) || (rv == CKR_FUNCTION_NOT_SUPPORTED))   {
+			/* Mechanism recognized and can be performed by pkcs#15 card or algorithm references not supported */
+		}
+		else {
+			/* Mechanism cannot be performed by pkcs#15 card, or some general error. */
+			free(data);
+			LOG_FUNC_RETURN(context, rv);
+		}
+	}
 
 	/* If this is a verify with hash operation, set up the
 	 * hash operation */
@@ -656,9 +686,9 @@ sc_pkcs11_verify_final(sc_pkcs11_operation_t *operation,
 {
 	struct signature_data *data;
 	struct sc_pkcs11_object *key;
-	unsigned char *pubkey_value;
+	unsigned char *pubkey_value = NULL;
 	CK_KEY_TYPE key_type;
-	CK_BYTE params[9 /* GOST_PARAMS_OID_SIZE */] = { 0 };
+	CK_BYTE params[9 /* GOST_PARAMS_ENCODED_OID_SIZE */] = { 0 };
 	CK_ATTRIBUTE attr = {CKA_VALUE, NULL, 0};
 	CK_ATTRIBUTE attr_key_type = {CKA_KEY_TYPE, &key_type, sizeof(key_type)};
 	CK_ATTRIBUTE attr_key_params = {CKA_GOSTR3410_PARAMS, &params, sizeof(params)};
@@ -670,17 +700,28 @@ sc_pkcs11_verify_final(sc_pkcs11_operation_t *operation,
 		return CKR_ARGUMENTS_BAD;
 
 	key = data->key;
+	rv = key->ops->get_attribute(operation->session, key, &attr_key_type);
+	if (rv != CKR_OK)
+		return rv;
+
+	if (key_type != CKK_GOSTR3410)
+		attr.type = CKA_SPKI;
+		
+
 	rv = key->ops->get_attribute(operation->session, key, &attr);
 	if (rv != CKR_OK)
 		return rv;
-	pubkey_value = malloc(attr.ulValueLen);
+	pubkey_value = calloc(1, attr.ulValueLen);
+	if (!pubkey_value) {
+		rv = CKR_HOST_MEMORY;
+		goto done;
+	}
 	attr.pValue = pubkey_value;
 	rv = key->ops->get_attribute(operation->session, key, &attr);
 	if (rv != CKR_OK)
 		goto done;
 
-	rv = key->ops->get_attribute(operation->session, key, &attr_key_type);
-	if (rv == CKR_OK && key_type == CKK_GOSTR3410) {
+	if (key_type == CKK_GOSTR3410) {
 		rv = key->ops->get_attribute(operation->session, key, &attr_key_params);
 		if (rv != CKR_OK)
 			goto done;
@@ -714,7 +755,7 @@ sc_pkcs11_decr_init(struct sc_pkcs11_session *session,
 	CK_RV rv;
 
 	if (!session || !session->slot
-	 || !(p11card = session->slot->card))
+	 || !(p11card = session->slot->p11card))
 		return CKR_ARGUMENTS_BAD;
 
 	/* See if we support this mechanism type */
@@ -784,7 +825,7 @@ sc_pkcs11_deri(struct sc_pkcs11_session *session,
 
 
 	if (!session || !session->slot
-	 || !(p11card = session->slot->card))
+	 || !(p11card = session->slot->p11card))
 		return CKR_ARGUMENTS_BAD;
 
 	/* See if we support this mechanism type */
@@ -811,19 +852,19 @@ sc_pkcs11_deri(struct sc_pkcs11_session *session,
 
 	ulDataLen = 0;
 	rv = operation->type->derive(operation, basekey,
-	    pMechanism->pParameter, pMechanism->ulParameterLen,
-	    NULL, &ulDataLen);
+			pMechanism->pParameter, pMechanism->ulParameterLen,
+			NULL, &ulDataLen);
 	if (rv != CKR_OK)
-	    goto out;
+		goto out;
 
 	if (ulDataLen > 0)
-	    keybuf = calloc(1,ulDataLen);
+		keybuf = calloc(1,ulDataLen);
 	else
-	    keybuf = calloc(1,8); /* pass in  dummy buffer */
+		keybuf = calloc(1,8); /* pass in  dummy buffer */
 
-        if (!keybuf) {
-	    rv = CKR_HOST_MEMORY;
-	    goto out;
+	if (!keybuf) {
+		rv = CKR_HOST_MEMORY;
+		goto out;
 	}
 
 	/* Now do the actuall derivation */
@@ -859,18 +900,31 @@ out:
 
 
 /*
- * Initialize a signature operation
+ * Initialize a decrypt operation
  */
 static CK_RV
 sc_pkcs11_decrypt_init(sc_pkcs11_operation_t *operation,
 			struct sc_pkcs11_object *key)
 {
 	struct signature_data *data;
+	CK_RV rv;
 
 	if (!(data = calloc(1, sizeof(*data))))
 		return CKR_HOST_MEMORY;
 
 	data->key = key;
+
+	if (key->ops->can_do)   {
+		rv = key->ops->can_do(operation->session, key, operation->type->mech, CKF_DECRYPT);
+		if ((rv == CKR_OK) || (rv == CKR_FUNCTION_NOT_SUPPORTED))   {
+			/* Mechanism recognized and can be performed by pkcs#15 card or algorithm references not supported */
+		}
+		else {
+			/* Mechanism cannot be performed by pkcs#15 card, or some general error. */
+			free(data);
+			LOG_FUNC_RETURN(context, rv);
+		}
+	}
 
 	operation->priv_data = data;
 	return CKR_OK;
@@ -906,6 +960,7 @@ sc_pkcs11_derive(sc_pkcs11_operation_t *operation,
 		    pmechParam, ulmechParamLen,
 		    pData, pulDataLen);
 }
+
 /*
  * Create new mechanism type for a mechanism supported by
  * the card
@@ -914,7 +969,8 @@ sc_pkcs11_mechanism_type_t *
 sc_pkcs11_new_fw_mechanism(CK_MECHANISM_TYPE mech,
 				CK_MECHANISM_INFO_PTR pInfo,
 				CK_KEY_TYPE key_type,
-				void *priv_data)
+				const void *priv_data,
+				void (*free_priv_data)(const void *priv_data))
 {
 	sc_pkcs11_mechanism_type_t *mt;
 
@@ -925,6 +981,7 @@ sc_pkcs11_new_fw_mechanism(CK_MECHANISM_TYPE mech,
 	mt->mech_info = *pInfo;
 	mt->key_type = key_type;
 	mt->mech_data = priv_data;
+	mt->free_mech_data = free_priv_data;
 	mt->obj_size = sizeof(sc_pkcs11_operation_t);
 
 	mt->release = sc_pkcs11_signature_release;
@@ -966,6 +1023,11 @@ sc_pkcs11_register_generic_mechanisms(struct sc_pkcs11_card *p11card)
 	return CKR_OK;
 }
 
+void free_info(const void *info)
+{
+	free((void *) info);
+}
+
 /*
  * Register a sign+hash algorithm derived from an algorithm supported
  * by the token + a software hash mechanism
@@ -979,6 +1041,7 @@ sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *p11card,
 	sc_pkcs11_mechanism_type_t *hash_type, *new_type;
 	struct hash_signature_info *info;
 	CK_MECHANISM_INFO mech_info = sign_type->mech_info;
+	CK_RV rv;
 
 	if (!(hash_type = sc_pkcs11_find_mechanism(p11card, hash_mech, CKF_DIGEST)))
 		return CKR_MECHANISM_INVALID;
@@ -987,15 +1050,26 @@ sc_pkcs11_register_sign_and_hash_mechanism(struct sc_pkcs11_card *p11card,
 	mech_info.flags &= (CKF_SIGN | CKF_SIGN_RECOVER | CKF_VERIFY | CKF_VERIFY_RECOVER);
 
 	info = calloc(1, sizeof(*info));
+	if (!info)
+		LOG_FUNC_RETURN(p11card->card->ctx, SC_ERROR_OUT_OF_MEMORY);
+
 	info->mech = mech;
 	info->sign_type = sign_type;
 	info->hash_type = hash_type;
 	info->sign_mech = sign_type->mech;
 	info->hash_mech = hash_mech;
 
-	new_type = sc_pkcs11_new_fw_mechanism(mech, &mech_info, sign_type->key_type, info);
-
-	if (!new_type)
+	new_type = sc_pkcs11_new_fw_mechanism(mech, &mech_info, sign_type->key_type, info, free_info);
+	if (!new_type) {
+		free_info(info);
 		return CKR_HOST_MEMORY;
-	return sc_pkcs11_register_mechanism(p11card, new_type);
+	}
+
+	rv = sc_pkcs11_register_mechanism(p11card, new_type);
+	if (CKR_OK != rv) {
+		new_type->free_mech_data(new_type->mech_data);
+		free(new_type);
+	}
+
+	return rv;
 }

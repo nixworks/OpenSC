@@ -27,12 +27,13 @@
 #include <sys/types.h>
 
 #include "config.h"
+#include "pkcs15-oberthur.h"
+
 #include "libopensc/opensc.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/log.h"
 #include "profile.h"
 #include "pkcs15-init.h"
-#include "pkcs15-oberthur.h"
 #include "libopensc/asn1.h"
 
 #ifdef ENABLE_OPENSSL
@@ -151,6 +152,7 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	if (otag)   {
 		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "obj template %s",otag);
 		if (sc_profile_get_file(profile, otag, &ofile) < 0) {
+			sc_file_free(ifile);
 			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "profile does not defines template '%s'", name);
 			return SC_ERROR_INCONSISTENT_PROFILE;
 		}
@@ -168,8 +170,9 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 				ifile->path.value[ifile->path.len-2] |= 0x01;
 			}
 
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "info_file(id:%04X,size:%i,rlen:%i)",
-					ifile->id, ifile->size, ifile->record_length);
+			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+				 "info_file(id:%04X,size:%"SC_FORMAT_LEN_SIZE_T"u,rlen:%i)",
+				 ifile->id, ifile->size, ifile->record_length);
 			*info_out = ifile;
 		}
 		else   {
@@ -178,7 +181,9 @@ awp_new_file(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	}
 
 	if (ofile)   {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "obj file %04X; size %i; ", ofile->id, ofile->size);
+		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			 "obj file %04X; size %"SC_FORMAT_LEN_SIZE_T"u; ",
+			 ofile->id, ofile->size);
 		if (obj_out)
 			*obj_out = ofile;
 		else
@@ -279,7 +284,10 @@ awp_create_container_record (struct sc_pkcs15_card *p15card, struct sc_profile *
 	memset(buff, 0, list_file->record_length);
 
 	rv = awp_new_container_entry(p15card, buff, list_file->record_length);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot create container");
+	if (rv < 0)   {
+		free(buff);
+		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot create container");
+	}
 
 	*(buff + 0) = (acc->pubkey_id >> 8) & 0xFF;
 	*(buff + 1) = acc->pubkey_id & 0xFF;
@@ -289,7 +297,6 @@ awp_create_container_record (struct sc_pkcs15_card *p15card, struct sc_profile *
 	*(buff + 5) = acc->cert_id & 0xFF;
 
 	rv = sc_select_file(p15card->card, &list_file->path, NULL);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "rv:%i", rv);
 	if (rv == SC_ERROR_FILE_NOT_FOUND)
 		rv = sc_pkcs15init_create_file(profile, p15card, list_file);
 
@@ -297,10 +304,6 @@ awp_create_container_record (struct sc_pkcs15_card *p15card, struct sc_profile *
 		rv = sc_append_record(p15card->card, buff, list_file->record_length, SC_RECORD_BY_REC_NR);
 
 	free(buff);
-
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "return after failure");
-
-	rv = 0;
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
 
@@ -312,7 +315,6 @@ awp_create_container(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	struct sc_context *ctx = p15card->card->ctx;
 	struct sc_file *clist = NULL, *file = NULL;
 	int rv = 0;
-	unsigned char *list = NULL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "create container(%X:%X:%X)", acc->prkey_id, acc->cert_id, acc->pubkey_id);
@@ -330,12 +332,8 @@ awp_create_container(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 
 	rv = awp_create_container_record(p15card, profile, file, acc);
 
-	if (clist)
-		sc_file_free(clist);
-	if (file)
-		sc_file_free(file);
-	if (list)
-		free(list);
+	sc_file_free(file);
+	sc_file_free(clist);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -351,7 +349,9 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 	unsigned char *buff = NULL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "update container entry(type:%X,len:%i,count %i,rec %i,offs %i", type, file_id, rec, offs);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "update container entry(type:%X,id %i,rec %i,offs %i",
+		 type, file_id, rec, offs);
 	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "container file(file-id:%X,rlen:%i,rcount:%i)",
 			list_file->id, list_file->record_length, list_file->record_count);
 
@@ -363,14 +363,15 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 
 	if (rec > list_file->record_count)   {
 		rv = awp_new_container_entry(p15card, buff, list_file->record_length);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot create container");
 	}
 	else   {
 		rv = sc_select_file(p15card->card, &list_file->path, NULL);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot select list_file");
-
-		rv = sc_read_record(p15card->card, rec, buff, list_file->record_length, SC_RECORD_BY_REC_NR);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "Cannot read record");
+		if (!rv)
+			rv = sc_read_record(p15card->card, rec, buff, list_file->record_length, SC_RECORD_BY_REC_NR);
+	}
+	if (rv < 0)   {
+		free(buff);
+		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 	}
 
 	switch (type)  {
@@ -384,8 +385,10 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 		break;
 	case SC_PKCS15_TYPE_PRKEY_RSA:
 	case COSM_TYPE_PRKEY_RSA:
-		if (*(buff + offs + 2))
+		if (*(buff + offs + 2)) {
+			free(buff);
 			SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INVALID_CARD, "private key exists already");
+		}
 
 		*(buff + offs + 2) = (file_id >> 8) & 0xFF;
 		*(buff + offs + 3) = file_id & 0xFF;
@@ -395,7 +398,8 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 		*(buff + offs + 5) = file_id & 0xFF;
 		break;
 	default:
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INCORRECT_PARAMETERS, "invalid object type");
+		free(buff);
+		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INCORRECT_PARAMETERS);
 	}
 
 	if (rec > list_file->record_count)   {
@@ -408,14 +412,9 @@ awp_update_container_entry (struct sc_pkcs15_card *p15card, struct sc_profile *p
 	}
 	else   {
 		rv = sc_update_record(p15card->card, rec, buff, list_file->record_length, SC_RECORD_BY_REC_NR);
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "rv:%i", rv);
 	}
 
 	free(buff);
-
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "return after failure");
-
-	rv = 0;
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
 
@@ -448,17 +447,14 @@ awp_update_container(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 	rv = awp_new_file(p15card, profile, COSM_CONTAINER_LIST, 0, &clist, NULL);
 	if (rv)
 		goto done;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "contaner cfile(rcount:%i,rlength:%i)", clist->record_count, clist->record_length);
 
 	rv = sc_select_file(p15card->card, &clist->path, &file);
 	if (rv)
 		goto done;
 	file->record_length = clist->record_length;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "contaner file(rcount:%i,rlength:%i)", file->record_count, file->record_length);
 	if (type == SC_PKCS15_TYPE_PRKEY_RSA || type == COSM_TYPE_PRKEY_RSA)   {
 		rec_offs = 0;
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Append new record %i for private key", file->record_count + 1);
 		rv = awp_update_container_entry(p15card, profile, file, type, obj_id, file->record_count + 1, rec_offs);
 		goto done;
 	}
@@ -495,53 +491,52 @@ awp_update_container(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 				struct sc_path path = private_path;
 				struct sc_file *ff = NULL;
 
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "container contains PrKey %02X%02X", *(list + offs + 2), *(list + offs + 3));
 				path.value[path.len - 2] = *(list + offs + 2) | 0x01;
 				path.value[path.len - 1] = *(list + offs + 3);
 				rv = sc_select_file(p15card->card, &path, &ff);
 				if (rv)
 					continue;
 
-        			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "file id %X; size %i", ff->id, ff->size);
-				buff = malloc(ff->size);
-				if (!buff)   {
-					rv = SC_ERROR_OUT_OF_MEMORY;
-					break;
-				}
-
 				rv = sc_pkcs15init_authenticate(profile, p15card, ff, SC_AC_OP_READ);
 				if (rv)   {
-					sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "sc_pkcs15init_authenticate(READ) failed");
+					sc_file_free(ff);
 					break;
 				}
 
-				rv = sc_read_binary(p15card->card, 0, buff, ff->size, 0);
-				if ((unsigned)rv == ff->size)  {
-					rv = 0;
-					id_offs = 5 + *(buff+3);
-					sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "rec %i; id offset %i",rec, id_offs);
-					if (key_id->len == *(buff + id_offs) &&
-						!memcmp(key_id->value, buff + id_offs + 1, key_id->len))  {
-						sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "found key file friend");
-						if (!rv)
-							rv = awp_update_container_entry(p15card, profile, file, type, obj_id, rec + 1, rec_offs);
+				buff = malloc(ff->size);
+				if (!buff)
+					rv = SC_ERROR_OUT_OF_MEMORY;
 
-						if (rv >= 0 && prkey_id)    {
-							*prkey_id = *(list + offs + 2) * 0x100 + *(list + offs + 3);
-							sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "*prkey_id 0x%X", *prkey_id);
+				if (!rv)   {
+					rv = sc_read_binary(p15card->card, 0, buff, ff->size, 0);
+					if ((unsigned)rv == ff->size)  {
+						rv = 0;
+						id_offs = 5 + *(buff+3);
+
+						if (key_id->len == *(buff + id_offs) &&
+								!memcmp(key_id->value, buff + id_offs + 1, key_id->len))  {
+							sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "found key file friend");
+							if (!rv)
+								rv = awp_update_container_entry(p15card, profile, file, type, obj_id, rec + 1, rec_offs);
+
+							if (rv >= 0 && prkey_id)
+								*prkey_id = *(list + offs + 2) * 0x100 + *(list + offs + 3);
 						}
 					}
 				}
 
 				free(buff);
 				sc_file_free(ff);
+
+				if (rv)
+					break;
 			}
 		}
 	}
 
 done:
-	if (clist)	sc_file_free(clist);
-	if (file)	sc_file_free(file);
+	sc_file_free(clist);
+	sc_file_free(file);
 	if (list)  free(list);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
@@ -573,16 +568,15 @@ awp_set_certificate_info (struct sc_pkcs15_card *p15card,
 	blob_size = 2;
 	if (!(blob = malloc(blob_size)))   {
 		r = SC_ERROR_OUT_OF_MEMORY;
-        	goto done;
+		goto done;
 	}
 
 	/* TODO: cert flags */
 	*blob       = (COSM_TAG_CERT >> 8) & 0xFF;
 	*(blob + 1) = COSM_TAG_CERT & 0xFF;
 
-	if (ci->label.len
-			&& ci->label.len != strlen(default_cert_label)
-		       	&& memcmp(ci->label.value, default_cert_label, strlen(default_cert_label)))
+	if (ci->label.len && ci->label.len != strlen(default_cert_label)
+			&& memcmp(ci->label.value, default_cert_label, strlen(default_cert_label)))
 		r = awp_update_blob(ctx, &blob, &blob_size, &ci->label, TLV_TYPE_LLV);
 	else
 		r = awp_update_blob(ctx, &blob, &blob_size, &ci->cn, TLV_TYPE_LLV);
@@ -591,11 +585,11 @@ awp_set_certificate_info (struct sc_pkcs15_card *p15card,
 
 	r = awp_update_blob(ctx, &blob, &blob_size, &ci->id, TLV_TYPE_LLV);
 	if (r)
-        	goto done;
+		goto done;
 
 	r = awp_update_blob(ctx, &blob, &blob_size, &ci->subject, TLV_TYPE_LLV);
 	if (r)
-        	goto done;
+		goto done;
 
 	if (ci->issuer.len != ci->subject.len ||
 			memcmp(ci->issuer.value, ci->subject.value, ci->subject.len))   {
@@ -735,7 +729,9 @@ awp_update_object_list(struct sc_pkcs15_card *p15card, struct sc_profile *profil
 		goto done;
 	}
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "ii %i, rv %i; %X; %i", ii, rv, file->id, file->size);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "ii %i, rv %i; %X; %"SC_FORMAT_LEN_SIZE_T"u",
+		 ii, rv, file->id, file->size);
 	*(buff + ii) = COSM_LIST_TAG;
 	*(buff + ii + 1) = (file->id >> 8) & 0xFF;
 	*(buff + ii + 2) = file->id & 0xFF;
@@ -784,16 +780,18 @@ awp_encode_key_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *obj
 	if (obj->type == COSM_TYPE_PUBKEY_RSA || obj->type == COSM_TYPE_PRKEY_RSA)
 		ki->flags |= COSM_GENERATED;
 
-	if (obj->label)   {
-		ki->label.value = (unsigned char *)strdup(obj->label);
-		ki->label.len = strlen(obj->label);
-	}
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "cosm_encode_key_info() label(%i):%s",ki->label.len, ki->label.value);
+	ki->label.value = (unsigned char *)strdup(obj->label);
+	ki->label.len = strlen(obj->label);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "cosm_encode_key_info() label(%u):%s",
+		 ki->label.len, ki->label.value);
 
 	/*
 	 * Oberthur saves modulus value without tag and length.
 	 */
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "pubkey->modulus.len %i",pubkey->modulus.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "pubkey->modulus.len %"SC_FORMAT_LEN_SIZE_T"u",
+		 pubkey->modulus.len);
 	ki->modulus.value = malloc(pubkey->modulus.len);
 	if (!ki->modulus.value)   {
 		r = SC_ERROR_OUT_OF_MEMORY;
@@ -833,12 +831,9 @@ done:
 static void
 awp_free_key_info(struct awp_key_info *ki)
 {
-	if (ki->modulus.value)
-		free(ki->modulus.value);
-	if (ki->exponent.value)
-		free(ki->exponent.value);
-	if (ki->id.value)
-		free(ki->id.value);
+	free(ki->modulus.value);
+	free(ki->exponent.value);
+	free(ki->id.value);
 }
 
 
@@ -941,14 +936,14 @@ awp_encode_cert_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 	cert_info = (struct sc_pkcs15_cert_info *)obj->data;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Encode cert(%s,id:%s,der(%p,%i))", obj->label,
-			sc_pkcs15_print_id(&cert_info->id), obj->content.value, obj->content.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Encode cert(%s,id:%s,der(%p,%"SC_FORMAT_LEN_SIZE_T"u))",
+		 obj->label, sc_pkcs15_print_id(&cert_info->id),
+		 obj->content.value, obj->content.len);
 	memset(&pubkey, 0, sizeof(pubkey));
 
-	if (obj->label)   {
-		ci->label.value = (unsigned char *)strdup(obj->label);
-		ci->label.len = strlen(obj->label);
-	}
+	ci->label.value = (unsigned char *)strdup(obj->label);
+	ci->label.len = strlen(obj->label);
 
 	mem = BIO_new_mem_buf(obj->content.value, obj->content.len);
 	if (!mem)
@@ -1011,6 +1006,30 @@ awp_encode_cert_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 	/*
 	 * serial number
 	 */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	
+	/* TODO the der encoding of a ANS1_INTEGER is a TLV, the original code only as using the 
+	 * i2c_ASN1_INTEGER which is not in OpenSSL 1.1  
+	 * It was adding the tag V_ASN1_INTEGER and the one byte length back in in effect creating
+	 * a DER encoded ASN1_INTEGER
+	 * So we can simplifty the code and make compatable with OpenSSL 1.1. This needs to be tested
+	 */
+	ci->serial.len = 0;
+	ci->serial.value = NULL;
+	/* get length */
+	ci->serial.len = i2d_ASN1_INTEGER(X509_get_serialNumber(x), NULL);
+	if (ci->serial.len > 0) {
+		if (!(ci->serial.value = malloc(ci->serial.len)))   {
+			ci->serial.len = 0;
+			r = SC_ERROR_OUT_OF_MEMORY;
+			goto done;
+		}
+		ci->serial.len = i2d_ASN1_INTEGER(X509_get_serialNumber(x), &ci->serial.value);
+	}
+	/* if len == 0, and value == NULL, then the cert did not have a serial number.*/
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "cert. serial encoded length %i", ci->serial.len);
+
+#else
 	do   {
 		int encoded_len;
 		unsigned char encoded[0x40], *encoded_ptr;
@@ -1030,6 +1049,7 @@ awp_encode_cert_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "cert. serial encoded length %i", encoded_len);
 	} while (0);
+#endif
 
 	ci->x509 = X509_dup(x);
 done:
@@ -1049,22 +1069,24 @@ done:
 static void
 awp_free_cert_info(struct awp_cert_info *ci)
 {
-	if (ci->cn.len && ci->cn.value)
-		free(ci->cn.value);
+	if (ci) {
+		if (ci->cn.len && ci->cn.value)
+			free(ci->cn.value);
 
-	if (ci->id.len && ci->id.value)
-		free(ci->id.value);
+		if (ci->id.len && ci->id.value)
+			free(ci->id.value);
 
-	if (ci->subject.len && ci->subject.value)
-		free(ci->subject.value);
+		if (ci->subject.len && ci->subject.value)
+			free(ci->subject.value);
 
-	if (ci->issuer.len && ci->issuer.value)
-		free(ci->issuer.value);
+		if (ci->issuer.len && ci->issuer.value)
+			free(ci->issuer.value);
 
-	if (ci->x509)
-		X509_free(ci->x509);
+		if (ci->x509)
+			X509_free(ci->x509);
 
-	memset(ci,0,sizeof(struct awp_cert_info));
+		memset(ci,0,sizeof(struct awp_cert_info));
+	}
 }
 
 
@@ -1085,22 +1107,21 @@ awp_encode_data_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 	data_info = (struct sc_pkcs15_data_info *)obj->data;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Encode data(%s,id:%s,der(%p,%i))", obj->label,
-			sc_pkcs15_print_id(&data_info->id), obj->content.value, obj->content.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Encode data(%s,id:%s,der(%p,%"SC_FORMAT_LEN_SIZE_T"u))",
+		 obj->label, sc_pkcs15_print_id(&data_info->id),
+		 obj->content.value, obj->content.len);
 
 	di->flags = 0x0000;
 
-	if (obj->label)   {
-		di->label.value = (unsigned char *)strdup(obj->label);
-		di->label.len = strlen(obj->label);
-	}
+	di->label.value = (unsigned char *)strdup(obj->label);
+	di->label.len = strlen(obj->label);
 
 	di->app.len = strlen(data_info->app_label);
 	if (di->app.len)   {
 		di->app.value = (unsigned char *)strdup(data_info->app_label);
 		if (!di->app.value)
-			SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY,
-					"AWP encode data failed: cannot allocate App.Label");
+			SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 	}
 
 	r = sc_asn1_encode_object_id(&buf, &buflen, &data_info->app_oid);
@@ -1108,8 +1129,10 @@ awp_encode_data_info(struct sc_pkcs15_card *p15card, struct sc_pkcs15_object *ob
 
 	di->oid.len = buflen + 2;
 	di->oid.value = malloc(di->oid.len);
-	if (!di->oid.value)
+	if (!di->oid.value) {
+		free(buf);
 		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY, "AWP encode data failed: cannot allocate OID");
+	}
 
 	*(di->oid.value + 0) = 0x06;
 	*(di->oid.value + 1) = buflen;
@@ -1361,7 +1384,8 @@ awp_update_df_create_cert(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "COSM new file error");
 
 	memset(&icert, 0, sizeof(icert));
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Cert Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Cert Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = awp_encode_cert_info(p15card, obj, &icert);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "'Create Cert' update DF failed: cannot encode info");
 
@@ -1382,10 +1406,8 @@ awp_update_df_create_cert(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 
 	awp_free_cert_info(&icert);
 
-	if (info_file)
-		sc_file_free(info_file);
-	if (obj_file)
-		sc_file_free(obj_file);
+	sc_file_free(info_file);
+	sc_file_free(obj_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1400,14 +1422,18 @@ awp_update_df_create_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	struct sc_pkcs15_der der;
 	struct awp_key_info ikey;
 	struct awp_cert_info icert;
-	struct sc_file *info_file=NULL, *obj_file=NULL;
+	struct sc_file *info_file=NULL;
 	struct sc_pkcs15_prkey_info *key_info;
 	struct sc_pkcs15_object *cert_obj = NULL, *pubkey_obj = NULL;
 	struct sc_path path;
 	struct awp_crypto_container cc;
+	struct sc_pkcs15_cert *p15cert = NULL;
 	int rv;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
+
+	memset(&ikey, 0, sizeof(ikey));
+	memset(&icert, 0, sizeof(icert));
 
 	key_info = (struct sc_pkcs15_prkey_info *)key_obj->data;
 	der = key_obj->content;
@@ -1419,21 +1445,21 @@ awp_update_df_create_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	rv = sc_pkcs15_find_cert_by_id(p15card, &key_info->id, &cert_obj);
 	if (!rv)   {
 		struct sc_pkcs15_cert_info *cert_info = (struct sc_pkcs15_cert_info *) cert_obj->data;
-		struct sc_pkcs15_cert *p15cert;
 
 		path = cert_info->path;
 		cc.cert_id = (path.value[path.len-1] & 0xFF) + (path.value[path.len-2] & 0xFF) * 0x100;
 
 		rv = sc_pkcs15_read_certificate(p15card, cert_info, &p15cert);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot get certificate");
+		SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot get certificate");
 
 		rv = sc_pkcs15_allocate_object_content(ctx, cert_obj, p15cert->data.value, p15cert->data.len);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot allocate content");
+		SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot allocate content");
 
 		rv = awp_encode_cert_info(p15card, cert_obj, &icert);
-		SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot encode cert info");
+		SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed:  cannot encode cert info");
 
 		sc_pkcs15_free_certificate(p15cert);
+		p15cert = NULL;
 	}
 
 	rv = sc_pkcs15_find_pubkey_by_id(p15card, &key_info->id, &pubkey_obj);
@@ -1442,31 +1468,35 @@ awp_update_df_create_prvkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 		cc.pubkey_id = (path.value[path.len-1] & 0xFF) + (path.value[path.len-2] & 0xFF) * 0x100;
 	}
 
-	rv = awp_new_file(p15card, profile, key_obj->type, cc.prkey_id & 0xFF, &info_file, &obj_file);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "New private key info file error");
+	rv = awp_new_file(p15card, profile, key_obj->type, cc.prkey_id & 0xFF, &info_file, NULL);
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "New private key info file error");
 
 	pubkey.algorithm = SC_ALGORITHM_RSA;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "PrKey Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "PrKey Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = sc_pkcs15_decode_pubkey(ctx, &pubkey, der.value, der.len);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: decode public key error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: decode public key error");
 
-	memset(&ikey, 0, sizeof(ikey));
 	rv = awp_encode_key_info(p15card, key_obj, &pubkey.u.rsa, &ikey);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: encode info error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: encode info error");
 
 	rv = awp_set_key_info(p15card, profile, info_file, &ikey, cert_obj ? &icert : NULL);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: set info error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: set info error");
 
 	rv = awp_update_object_list(p15card, profile, key_obj->type, cc.prkey_id & 0xFF);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: update object list error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: update object list error");
 
 	rv = awp_create_container(p15card, profile, key_obj->type, &ikey.id, &cc);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: update container error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update private key' DF failed: update container error");
 
+err:
+	if (p15cert)
+		sc_pkcs15_free_certificate(p15cert);
+	sc_file_free(info_file);
 	if (cert_obj)
 		awp_free_cert_info(&icert);
-
 	awp_free_key_info(&ikey);
+
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
 
@@ -1479,7 +1509,7 @@ awp_update_df_create_pubkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	struct sc_pkcs15_pubkey pubkey;
 	struct sc_pkcs15_der der;
 	struct awp_key_info ikey;
-	struct sc_file *info_file=NULL, *obj_file=NULL;
+	struct sc_file *info_file=NULL;
 	struct sc_path path;
 	unsigned obj_id;
 	int index, rv;
@@ -1491,28 +1521,32 @@ awp_update_df_create_pubkey(struct sc_pkcs15_card *p15card, struct sc_profile *p
 	index = path.value[path.len-1] & 0xFF;
 	obj_id = (path.value[path.len-1] & 0xFF) + (path.value[path.len-2] & 0xFF) * 0x100;
 
-	rv = awp_new_file(p15card, profile, obj->type, index, &info_file, &obj_file);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "New public key info file error");
+	memset(&ikey, 0, sizeof(ikey));
+
+	rv = awp_new_file(p15card, profile, obj->type, index, &info_file, NULL);
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "New public key info file error");
 
 	pubkey.algorithm = SC_ALGORITHM_RSA;
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "PrKey Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "PrKey Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = sc_pkcs15_decode_pubkey(ctx, &pubkey, der.value, der.len);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: decode public key error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: decode public key error");
 
-	memset(&ikey, 0, sizeof(ikey));
 	rv = awp_encode_key_info(p15card, obj, &pubkey.u.rsa, &ikey);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: encode info error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: encode info error");
 
 	rv = awp_set_key_info(p15card, profile, info_file, &ikey, NULL);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: set info error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: set info error");
 
 	rv = awp_update_object_list(p15card, profile, obj->type, index);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: update object list error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: update object list error");
 
 	rv = awp_update_container(p15card, profile, obj->type, &ikey.id, obj_id, NULL);
-	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: update container error");
+	SC_TEST_GOTO_ERR(ctx, SC_LOG_DEBUG_NORMAL, rv, "AWP 'update public key' DF failed: update container error");
 
+err:
 	awp_free_key_info(&ikey);
+	sc_file_free(info_file);
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
 
@@ -1539,7 +1573,8 @@ awp_update_df_create_data(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "COSM new file error");
 
 	memset(&idata, 0, sizeof(idata));
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Data Der(%p,%i)", der.value, der.len);
+	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		 "Data Der(%p,%"SC_FORMAT_LEN_SIZE_T"u)", der.value, der.len);
 	rv = awp_encode_data_info(p15card, obj, &idata);
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, rv, "'Create Data' update DF failed: cannot encode info");
 
@@ -1551,10 +1586,8 @@ awp_update_df_create_data(struct sc_pkcs15_card *p15card, struct sc_profile *pro
 
 	awp_free_data_info(&idata);
 
-	if (info_file)
-		sc_file_free(info_file);
-	if (obj_file)
-		sc_file_free(obj_file);
+	sc_file_free(info_file);
+	sc_file_free(obj_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1565,7 +1598,7 @@ awp_update_df_create(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 		struct sc_pkcs15_object *object)
 {
 	struct sc_context *ctx = p15card->card->ctx;
-	int rv;
+	int rv = SC_ERROR_INTERNAL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 	if (!object)
@@ -1668,9 +1701,9 @@ awp_delete_from_container(struct sc_pkcs15_card *p15card,
 	if (rv > 0)
 		rv = 0;
 
-	if (buff)		free(buff);
-	if (file)		sc_file_free(file);
-	if (clist)		sc_file_free(clist);
+	free(buff);
+	sc_file_free(clist);
+	sc_file_free(file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1744,10 +1777,8 @@ awp_remove_from_object_list( struct sc_pkcs15_card *p15card, struct sc_profile *
 done:
 	if (buff)
 		free(buff);
-	if (lst)
-		sc_file_free(lst);
-	if (lst_file)
-		sc_file_free(lst_file);
+	sc_file_free(lst);
+	sc_file_free(lst_file);
 
 	SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, rv);
 }
@@ -1891,7 +1922,7 @@ awp_update_df_delete(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
 		struct sc_pkcs15_object *object)
 {
 	struct sc_context *ctx = p15card->card->ctx;
-	int rv;
+	int rv = SC_ERROR_INTERNAL;
 
 	SC_FUNC_CALLED(ctx, SC_LOG_DEBUG_NORMAL);
 	if (!object)

@@ -143,31 +143,31 @@ struct list_dump_header_s {
 
 
 /* deletes tmp from list, with care wrt its position (head, tail, middle) */
-static int list_drop_elem(list_t *restrict l, struct list_entry_s *tmp, unsigned int pos);
+static int list_drop_elem(list_t *simclist_restrict l, struct list_entry_s *tmp, unsigned int pos);
 
 /* set default values for initialized lists */
-static int list_attributes_setdefaults(list_t *restrict l);
+static int list_attributes_setdefaults(list_t *simclist_restrict l);
 
 #ifndef NDEBUG
 /* check whether the list internal REPresentation is valid -- Costs O(n) */
-static int list_repOk(const list_t *restrict l);
+static int list_repOk(const list_t *simclist_restrict l);
 
 /* check whether the list attribute set is valid -- Costs O(1) */
-static int list_attrOk(const list_t *restrict l);
+static int list_attrOk(const list_t *simclist_restrict l);
 #endif
 
 /* do not inline, this is recursive */
-static void list_sort_quicksort(list_t *restrict l, int versus,
+static void list_sort_quicksort(list_t *simclist_restrict l, int versus,
         unsigned int first, struct list_entry_s *fel,
         unsigned int last, struct list_entry_s *lel);
 
-static inline void list_sort_selectionsort(list_t *restrict l, int versus,
+static simclist_inline void list_sort_selectionsort(list_t *simclist_restrict l, int versus,
         unsigned int first, struct list_entry_s *fel,
         unsigned int last, struct list_entry_s *lel);
 
-static void *list_get_minmax(const list_t *restrict l, int versus);
+static void *list_get_minmax(const list_t *simclist_restrict l, int versus);
 
-static inline struct list_entry_s *list_findpos(const list_t *restrict l, int posstart);
+static simclist_inline struct list_entry_s *list_findpos(const list_t *simclist_restrict l, int posstart);
 
 #ifdef SIMCLIST_DUMPRESTORE
 /* write() decorated with error checking logic */
@@ -178,6 +178,7 @@ static inline struct list_entry_s *list_findpos(const list_t *restrict l, int po
 #define READ_ERRCHECK(fd, msgbuf, msglen)      do {                                                     \
                                                     if (read(fd, msgbuf, msglen) != msglen) {           \
                                                         /*errno = EPROTO;*/                             \
+                                                        free(buf);                                      \
                                                         return -1;                                      \
                                                     }                                                   \
                                                 } while (0);
@@ -209,12 +210,12 @@ static inline struct list_entry_s *list_findpos(const list_t *restrict l, int po
 static unsigned random_seed = 0;
 
 /* use local RNG */
-static inline void seed_random() {
+static simclist_inline void seed_random() {
     if (random_seed == 0)
         random_seed = (unsigned)getpid() ^ (unsigned)time(NULL);
 }
 
-static inline long get_random() {
+static simclist_inline long get_random() {
     random_seed = (1664525 * random_seed + 1013904223);
     return random_seed;
 }
@@ -227,8 +228,12 @@ static inline long get_random() {
 
 
 /* list initialization */
-int list_init(list_t *restrict l) {
-    if (l == NULL) return -1;
+int list_init(list_t *simclist_restrict l) {
+    if (l == NULL) {
+        return -1;
+    }
+
+    memset(l, 0, sizeof *l);
 
     seed_random();
 
@@ -237,6 +242,9 @@ int list_init(list_t *restrict l) {
     /* head/tail sentinels and mid pointer */
     l->head_sentinel = (struct list_entry_s *)malloc(sizeof(struct list_entry_s));
     l->tail_sentinel = (struct list_entry_s *)malloc(sizeof(struct list_entry_s));
+    if (l->tail_sentinel == NULL || l->head_sentinel == NULL) {
+        return -1;
+    }
     l->head_sentinel->next = l->tail_sentinel;
     l->tail_sentinel->prev = l->head_sentinel;
     l->head_sentinel->prev = l->tail_sentinel->next = l->mid = NULL;
@@ -248,14 +256,19 @@ int list_init(list_t *restrict l) {
     l->iter_curentry = NULL;
 
     /* free-list attributes */
-    l->spareels = (struct list_entry_s **)malloc(SIMCLIST_MAX_SPARE_ELEMS * sizeof(struct list_entry_s *));
     l->spareelsnum = 0;
+    l->spareels = (struct list_entry_s **)malloc(SIMCLIST_MAX_SPARE_ELEMS * sizeof(struct list_entry_s *));
+    if (l->spareels == NULL) {
+        return -1;
+    }
 
 #ifdef SIMCLIST_WITH_THREADS
     l->threadcount = 0;
 #endif
 
-    list_attributes_setdefaults(l);
+    if (0 != list_attributes_setdefaults(l)) {
+        return -1;
+    }
 
     assert(list_repOk(l));
     assert(list_attrOk(l));
@@ -263,7 +276,7 @@ int list_init(list_t *restrict l) {
     return 0;
 }
 
-void list_destroy(list_t *restrict l) {
+void list_destroy(list_t *simclist_restrict l) {
     unsigned int i;
 
     list_clear(l);
@@ -275,7 +288,7 @@ void list_destroy(list_t *restrict l) {
     free(l->tail_sentinel);
 }
 
-int list_attributes_setdefaults(list_t *restrict l) {
+int list_attributes_setdefaults(list_t *simclist_restrict l) {
     l->attrs.comparator = NULL;
     l->attrs.seeker = NULL;
 
@@ -295,7 +308,7 @@ int list_attributes_setdefaults(list_t *restrict l) {
 }
 
 /* setting list properties */
-int list_attributes_comparator(list_t *restrict l, element_comparator comparator_fun) {
+int list_attributes_comparator(list_t *simclist_restrict l, element_comparator comparator_fun) {
     if (l == NULL) return -1;
 
     l->attrs.comparator = comparator_fun;
@@ -305,7 +318,7 @@ int list_attributes_comparator(list_t *restrict l, element_comparator comparator
     return 0;
 }
 
-int list_attributes_seeker(list_t *restrict l, element_seeker seeker_fun) {
+int list_attributes_seeker(list_t *simclist_restrict l, element_seeker seeker_fun) {
     if (l == NULL) return -1;
 
     l->attrs.seeker = seeker_fun;
@@ -314,7 +327,7 @@ int list_attributes_seeker(list_t *restrict l, element_seeker seeker_fun) {
     return 0;
 }
 
-int list_attributes_copy(list_t *restrict l, element_meter metric_fun, int copy_data) {
+int list_attributes_copy(list_t *simclist_restrict l, element_meter metric_fun, int copy_data) {
     if (l == NULL || (metric_fun == NULL && copy_data != 0)) return -1;
 
     l->attrs.meter = metric_fun;
@@ -325,7 +338,7 @@ int list_attributes_copy(list_t *restrict l, element_meter metric_fun, int copy_
     return 0;
 }
 
-int list_attributes_hash_computer(list_t *restrict l, element_hash_computer hash_computer_fun) {
+int list_attributes_hash_computer(list_t *simclist_restrict l, element_hash_computer hash_computer_fun) {
     if (l == NULL) return -1;
 
     l->attrs.hasher = hash_computer_fun;
@@ -333,7 +346,7 @@ int list_attributes_hash_computer(list_t *restrict l, element_hash_computer hash
     return 0;
 }
 
-int list_attributes_serializer(list_t *restrict l, element_serializer serializer_fun) {
+int list_attributes_serializer(list_t *simclist_restrict l, element_serializer serializer_fun) {
     if (l == NULL) return -1;
 
     l->attrs.serializer = serializer_fun;
@@ -341,7 +354,7 @@ int list_attributes_serializer(list_t *restrict l, element_serializer serializer
     return 0;
 }
 
-int list_attributes_unserializer(list_t *restrict l, element_unserializer unserializer_fun) {
+int list_attributes_unserializer(list_t *simclist_restrict l, element_unserializer unserializer_fun) {
     if (l == NULL) return -1;
 
     l->attrs.unserializer = unserializer_fun;
@@ -349,19 +362,19 @@ int list_attributes_unserializer(list_t *restrict l, element_unserializer unseri
     return 0;
 }
 
-int list_append(list_t *restrict l, const void *data) {
+int list_append(list_t *simclist_restrict l, const void *data) {
     return list_insert_at(l, data, l->numels);
 }
 
-int list_prepend(list_t *restrict l, const void *data) {
+int list_prepend(list_t *simclist_restrict l, const void *data) {
     return list_insert_at(l, data, 0);
 }
 
-void *list_fetch(list_t *restrict l) {
+void *list_fetch(list_t *simclist_restrict l) {
     return list_extract_at(l, 0);
 }
 
-void *list_get_at(const list_t *restrict l, unsigned int pos) {
+void *list_get_at(const list_t *simclist_restrict l, unsigned int pos) {
     struct list_entry_s *tmp;
 
     tmp = list_findpos(l, pos);
@@ -369,17 +382,17 @@ void *list_get_at(const list_t *restrict l, unsigned int pos) {
     return (tmp != NULL ? tmp->data : NULL);
 }
 
-void *list_get_max(const list_t *restrict l) {
+void *list_get_max(const list_t *simclist_restrict l) {
     return list_get_minmax(l, +1);
 }
 
-void *list_get_min(const list_t *restrict l) {
+void *list_get_min(const list_t *simclist_restrict l) {
     return list_get_minmax(l, -1);
 }
 
 /* REQUIRES {list->numels >= 1}
  * return the min (versus < 0) or max value (v > 0) in l */
-static void *list_get_minmax(const list_t *restrict l, int versus) {
+static void *list_get_minmax(const list_t *simclist_restrict l, int versus) {
     void *curminmax;
     struct list_entry_s *s;
 
@@ -396,10 +409,12 @@ static void *list_get_minmax(const list_t *restrict l, int versus) {
 }
 
 /* set tmp to point to element at index posstart in l */
-static inline struct list_entry_s *list_findpos(const list_t *restrict l, int posstart) {
+static simclist_inline struct list_entry_s *list_findpos(const list_t *simclist_restrict l, int posstart) {
     struct list_entry_s *ptr;
     float x;
     int i;
+
+    if (l->head_sentinel == NULL || l->tail_sentinel == NULL) return NULL;
 
     /* accept 1 slot overflow for fetching head and tail sentinels */
     if (posstart < -1 || posstart > (int)l->numels) return NULL;
@@ -422,13 +437,16 @@ static inline struct list_entry_s *list_findpos(const list_t *restrict l, int po
     return ptr;
 }
 
-void *list_extract_at(list_t *restrict l, unsigned int pos) {
+void *list_extract_at(list_t *simclist_restrict l, unsigned int pos) {
     struct list_entry_s *tmp;
     void *data;
 
     if (l->iter_active || pos >= l->numels) return NULL;
 
     tmp = list_findpos(l, pos);
+    if (tmp == NULL) {
+        return NULL;
+    }
     data = tmp->data;
 
     tmp->data = NULL;   /* save data from list_drop_elem() free() */
@@ -440,7 +458,7 @@ void *list_extract_at(list_t *restrict l, unsigned int pos) {
     return data;
 }
 
-int list_insert_at(list_t *restrict l, const void *data, unsigned int pos) {
+int list_insert_at(list_t *simclist_restrict l, const void *data, unsigned int pos) {
     struct list_entry_s *lent, *succ, *prec;
 
     if (l->iter_active || pos > l->numels) return -1;
@@ -451,14 +469,18 @@ int list_insert_at(list_t *restrict l, const void *data, unsigned int pos) {
         l->spareelsnum--;
     } else {
         lent = (struct list_entry_s *)malloc(sizeof(struct list_entry_s));
-        if (lent == NULL)
+        if (lent == NULL) {
             return -1;
+        }
     }
 
     if (l->attrs.copy_data) {
         /* make room for user' data (has to be copied) */
         size_t datalen = l->attrs.meter(data);
         lent->data = (struct list_entry_s *)malloc(datalen);
+        if (lent->data == NULL) {
+            return -1;
+        }
         memcpy(lent->data, data, datalen);
     } else {
         lent->data = (void*)data;
@@ -466,6 +488,15 @@ int list_insert_at(list_t *restrict l, const void *data, unsigned int pos) {
 
     /* actually append element */
     prec = list_findpos(l, pos-1);
+    if (prec == NULL) {
+        if (l->attrs.copy_data) {
+            free(lent->data);
+        }
+        if (!(l->spareelsnum > 0)) {
+            free(lent);
+        }
+        return -1;
+    }
     succ = prec->next;
 
     prec->next = lent;
@@ -489,7 +520,7 @@ int list_insert_at(list_t *restrict l, const void *data, unsigned int pos) {
     return 1;
 }
 
-int list_delete(list_t *restrict l, const void *data) {
+int list_delete(list_t *simclist_restrict l, const void *data) {
 	int pos, r;
 
 	pos = list_locate(l, data);
@@ -505,7 +536,7 @@ int list_delete(list_t *restrict l, const void *data) {
 	return 0;
 }
 
-int list_delete_at(list_t *restrict l, unsigned int pos) {
+int list_delete_at(list_t *simclist_restrict l, unsigned int pos) {
     struct list_entry_s *delendo;
 
 
@@ -523,7 +554,7 @@ int list_delete_at(list_t *restrict l, unsigned int pos) {
     return  0;
 }
 
-int list_delete_range(list_t *restrict l, unsigned int posstart, unsigned int posend) {
+int list_delete_range(list_t *simclist_restrict l, unsigned int posstart, unsigned int posend) {
     struct list_entry_s *lastvalid, *tmp, *tmp2;
     unsigned int i;
     int movedx;
@@ -532,6 +563,9 @@ int list_delete_range(list_t *restrict l, unsigned int posstart, unsigned int po
     if (l->iter_active || posend < posstart || posend >= l->numels) return -1;
 
     tmp = list_findpos(l, posstart);    /* first el to be deleted */
+    if (tmp == NULL) {
+        return -1;
+    }
     lastvalid = tmp->prev;              /* last valid element */
 
     numdel = posend - posstart + 1;
@@ -585,39 +619,41 @@ int list_delete_range(list_t *restrict l, unsigned int posstart, unsigned int po
     return 0;
 }
 
-int list_clear(list_t *restrict l) {
+int list_clear(list_t *simclist_restrict l) {
     struct list_entry_s *s;
 
     if (l->iter_active) return -1;
 
-    if (l->attrs.copy_data) {        /* also free user data */
-        /* spare a loop conditional with two loops: spareing elems and freeing elems */
-        for (s = l->head_sentinel->next; l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS && s != l->tail_sentinel; s = s->next) {
-            /* move elements as spares as long as there is room */
-            if (s->data != NULL) free(s->data);
-            l->spareels[l->spareelsnum++] = s;
+    if (l->head_sentinel && l->tail_sentinel) {
+        if (l->attrs.copy_data) {        /* also free user data */
+            /* spare a loop conditional with two loops: spareing elems and freeing elems */
+            for (s = l->head_sentinel->next; l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS && s != l->tail_sentinel; s = s->next) {
+                /* move elements as spares as long as there is room */
+                if (s->data != NULL) free(s->data);
+                l->spareels[l->spareelsnum++] = s;
+            }
+            while (s != l->tail_sentinel) {
+                /* free the remaining elems */
+                if (s->data != NULL) free(s->data);
+                s = s->next;
+                free(s->prev);
+            }
+            l->head_sentinel->next = l->tail_sentinel;
+            l->tail_sentinel->prev = l->head_sentinel;
+        } else { /* only free element containers */
+            /* spare a loop conditional with two loops: spareing elems and freeing elems */
+            for (s = l->head_sentinel->next; l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS && s != l->tail_sentinel; s = s->next) {
+                /* move elements as spares as long as there is room */
+                l->spareels[l->spareelsnum++] = s;
+            }
+            while (s != l->tail_sentinel) {
+                /* free the remaining elems */
+                s = s->next;
+                free(s->prev);
+            }
+            l->head_sentinel->next = l->tail_sentinel;
+            l->tail_sentinel->prev = l->head_sentinel;
         }
-        while (s != l->tail_sentinel) {
-            /* free the remaining elems */
-            if (s->data != NULL) free(s->data);
-            s = s->next;
-            free(s->prev);
-        }
-        l->head_sentinel->next = l->tail_sentinel;
-        l->tail_sentinel->prev = l->head_sentinel;
-    } else { /* only free element containers */
-        /* spare a loop conditional with two loops: spareing elems and freeing elems */
-        for (s = l->head_sentinel->next; l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS && s != l->tail_sentinel; s = s->next) {
-            /* move elements as spares as long as there is room */
-            l->spareels[l->spareelsnum++] = s;
-        }
-        while (s != l->tail_sentinel) {
-            /* free the remaining elems */
-            s = s->next;
-            free(s->prev);
-        }
-        l->head_sentinel->next = l->tail_sentinel;
-        l->tail_sentinel->prev = l->head_sentinel;
     }
     l->numels = 0;
     l->mid = NULL;
@@ -627,17 +663,19 @@ int list_clear(list_t *restrict l) {
     return 0;
 }
 
-unsigned int list_size(const list_t *restrict l) {
+unsigned int list_size(const list_t *simclist_restrict l) {
     return l->numels;
 }
 
-int list_empty(const list_t *restrict l) {
+int list_empty(const list_t *simclist_restrict l) {
     return (l->numels == 0);
 }
 
-int list_locate(const list_t *restrict l, const void *data) {
+int list_locate(const list_t *simclist_restrict l, const void *data) {
     struct list_entry_s *el;
     int pos = 0;
+
+    if (l->head_sentinel == NULL || l->tail_sentinel == NULL) return -1;
 
     if (l->attrs.comparator != NULL) {
         /* use comparator */
@@ -655,10 +693,12 @@ int list_locate(const list_t *restrict l, const void *data) {
     return pos;
 }
 
-void *list_seek(list_t *restrict l, const void *indicator) {
+void *list_seek(list_t *simclist_restrict l, const void *indicator) {
     const struct list_entry_s *iter;
 
     if (l->attrs.seeker == NULL) return NULL;
+
+    if (l->head_sentinel == NULL || l->tail_sentinel == NULL) return NULL;
 
     for (iter = l->head_sentinel->next; iter != l->tail_sentinel; iter = iter->next) {
         if (l->attrs.seeker(iter->data, indicator) != 0) return iter->data;
@@ -667,20 +707,24 @@ void *list_seek(list_t *restrict l, const void *indicator) {
     return NULL;
 }
 
-int list_contains(const list_t *restrict l, const void *data) {
+int list_contains(const list_t *simclist_restrict l, const void *data) {
     return (list_locate(l, data) >= 0);
 }
 
-int list_concat(const list_t *l1, const list_t *l2, list_t *restrict dest) {
+int list_concat(const list_t *l1, const list_t *l2, list_t *simclist_restrict dest) {
     struct list_entry_s *el, *srcel;
     unsigned int cnt;
     int err;
 
-
     if (l1 == NULL || l2 == NULL || dest == NULL || l1 == dest || l2 == dest)
         return -1;
 
-    list_init(dest);
+    if (l1->head_sentinel == NULL || l1->tail_sentinel == NULL
+            || l2->head_sentinel == NULL || l2->tail_sentinel == NULL) return -1;
+
+    if (0 != list_init(dest)) {
+        return -1;
+    }
 
     dest->numels = l1->numels + l2->numels;
     if (dest->numels == 0)
@@ -691,6 +735,9 @@ int list_concat(const list_t *l1, const list_t *l2, list_t *restrict dest) {
     el = dest->head_sentinel;
     while (srcel != l1->tail_sentinel) {
         el->next = (struct list_entry_s *)malloc(sizeof(struct list_entry_s));
+        if (el->next == NULL) {
+            return -1;
+        }
         el->next->prev = el;
         el = el->next;
         el->data = srcel->data;
@@ -701,6 +748,9 @@ int list_concat(const list_t *l1, const list_t *l2, list_t *restrict dest) {
     srcel = l2->head_sentinel->next;
     while (srcel != l2->tail_sentinel) {
         el->next = (struct list_entry_s *)malloc(sizeof(struct list_entry_s));
+        if (el->next == NULL) {
+            return -1;
+        }
         el->next->prev = el;
         el = el->next;
         el->data = srcel->data;
@@ -724,12 +774,15 @@ int list_concat(const list_t *l1, const list_t *l2, list_t *restrict dest) {
     return 0;
 }
 
-int list_sort(list_t *restrict l, int versus) {
+int list_sort(list_t *simclist_restrict l, int versus) {
     if (l->iter_active || l->attrs.comparator == NULL) /* cannot modify list in the middle of an iteration */
         return -1;
 
     if (l->numels <= 1)
         return 0;
+
+    if (l->head_sentinel == NULL || l->tail_sentinel == NULL) return -1;
+
     list_sort_quicksort(l, versus, 0, l->head_sentinel->next, l->numels-1, l->tail_sentinel->prev);
     assert(list_repOk(l));
     return 0;
@@ -737,7 +790,7 @@ int list_sort(list_t *restrict l, int versus) {
 
 #ifdef SIMCLIST_WITH_THREADS
 struct list_sort_wrappedparams {
-    list_t *restrict l;
+    list_t *simclist_restrict l;
     int versus;
     unsigned int first, last;
     struct list_entry_s *fel, *lel;
@@ -752,7 +805,7 @@ static void *list_sort_quicksort_threadwrapper(void *wrapped_params) {
 }
 #endif
 
-static inline void list_sort_selectionsort(list_t *restrict l, int versus,
+static simclist_inline void list_sort_selectionsort(list_t *simclist_restrict l, int versus,
         unsigned int first, struct list_entry_s *fel,
         unsigned int last, struct list_entry_s *lel) {
     struct list_entry_s *cursor, *toswap, *firstunsorted;
@@ -773,7 +826,7 @@ static inline void list_sort_selectionsort(list_t *restrict l, int versus,
     }
 }
 
-static void list_sort_quicksort(list_t *restrict l, int versus,
+static void list_sort_quicksort(list_t *simclist_restrict l, int versus,
         unsigned int first, struct list_entry_s *fel,
         unsigned int last, struct list_entry_s *lel) {
     unsigned int pivotid;
@@ -868,6 +921,9 @@ static void list_sort_quicksort(list_t *restrict l, int versus,
         /* prepare wrapped args, then start thread */
         if (l->threadcount < SIMCLIST_MAXTHREADS-1) {
             struct list_sort_wrappedparams *wp = (struct list_sort_wrappedparams *)malloc(sizeof(struct list_sort_wrappedparams));
+            if (wp == NULL) {
+                return -1;
+            }
             l->threadcount++;
             traised = 1;
             wp->l = l;
@@ -896,15 +952,16 @@ static void list_sort_quicksort(list_t *restrict l, int versus,
 #endif
 }
 
-int list_iterator_start(list_t *restrict l) {
+int list_iterator_start(list_t *simclist_restrict l) {
     if (l->iter_active) return 0;
+    if (l->head_sentinel == NULL) return -1;
     l->iter_pos = 0;
     l->iter_active = 1;
     l->iter_curentry = l->head_sentinel->next;
     return 1;
 }
 
-void *list_iterator_next(list_t *restrict l) {
+void *list_iterator_next(list_t *simclist_restrict l) {
     void *toret;
 
     if (! l->iter_active) return NULL;
@@ -916,19 +973,19 @@ void *list_iterator_next(list_t *restrict l) {
     return toret;
 }
 
-int list_iterator_hasnext(const list_t *restrict l) {
+int list_iterator_hasnext(const list_t *simclist_restrict l) {
     if (! l->iter_active) return 0;
     return (l->iter_pos < l->numels);
 }
 
-int list_iterator_stop(list_t *restrict l) {
+int list_iterator_stop(list_t *simclist_restrict l) {
     if (! l->iter_active) return 0;
     l->iter_pos = 0;
     l->iter_active = 0;
     return 1;
 }
 
-int list_hash(const list_t *restrict l, list_hash_t *restrict hash) {
+int list_hash(const list_t *simclist_restrict l, list_hash_t *simclist_restrict hash) {
     struct list_entry_s *x;
     list_hash_t tmphash;
 
@@ -975,7 +1032,7 @@ int gettimeofday(struct timeval* tp, void* tzp) {
     return 0;
 }
 #endif
-int list_dump_getinfo_filedescriptor(int fd, list_dump_info_t *restrict info) {
+int list_dump_getinfo_filedescriptor(int fd, list_dump_info_t *simclist_restrict info) {
     int32_t terminator_head, terminator_tail;
     uint32_t elemlen;
     off_t hop;
@@ -1037,7 +1094,7 @@ int list_dump_getinfo_filedescriptor(int fd, list_dump_info_t *restrict info) {
     return 0;
 }
 
-int list_dump_getinfo_file(const char *restrict filename, list_dump_info_t *restrict info) {
+int list_dump_getinfo_file(const char *simclist_restrict filename, list_dump_info_t *simclist_restrict info) {
     int fd, ret;
 
     fd = open(filename, O_RDONLY, 0);
@@ -1049,7 +1106,7 @@ int list_dump_getinfo_file(const char *restrict filename, list_dump_info_t *rest
     return ret;
 }
 
-int list_dump_filedescriptor(const list_t *restrict l, int fd, size_t *restrict len) {
+int list_dump_filedescriptor(const list_t *simclist_restrict l, int fd, size_t *simclist_restrict len) {
     struct list_entry_s *x;
     void *ser_buf;
     uint32_t bufsize;
@@ -1196,10 +1253,10 @@ int list_dump_filedescriptor(const list_t *restrict l, int fd, size_t *restrict 
     return 0;
 }
 
-int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len) {
+int list_restore_filedescriptor(list_t *simclist_restrict l, int fd, size_t *simclist_restrict len) {
     struct list_dump_header_s header;
     unsigned long cnt;
-    void *buf;
+    void *buf = NULL;
     uint32_t elsize, totreadlen, totmemorylen;
 
     memset(& header, 0, sizeof(header));
@@ -1246,6 +1303,9 @@ int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len
         if (l->attrs.unserializer != NULL) {
             /* use unserializer */
             buf = malloc(header.elemlen);
+            if (buf == NULL) {
+                return -1;
+            }
             for (cnt = 0; cnt < header.numels; cnt++) {
                 READ_ERRCHECK(fd, buf, header.elemlen);
                 list_append(l, l->attrs.unserializer(buf, & elsize));
@@ -1255,6 +1315,9 @@ int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len
             /* copy verbatim into memory */
             for (cnt = 0; cnt < header.numels; cnt++) {
                 buf = malloc(header.elemlen);
+                if (buf == NULL) {
+                    return -1;
+                }
                 READ_ERRCHECK(fd, buf, header.elemlen);
                 list_append(l, buf);
             }
@@ -1268,6 +1331,9 @@ int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len
             for (cnt = 0; cnt < header.numels; cnt++) {
                 READ_ERRCHECK(fd, & elsize, sizeof(elsize));
                 buf = malloc((size_t)elsize);
+                if (buf == NULL) {
+                    return -1;
+                }
                 READ_ERRCHECK(fd, buf, elsize);
                 totreadlen += elsize;
                 list_append(l, l->attrs.unserializer(buf, & elsize));
@@ -1278,6 +1344,9 @@ int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len
             for (cnt = 0; cnt < header.numels; cnt++) {
                 READ_ERRCHECK(fd, & elsize, sizeof(elsize));
                 buf = malloc(elsize);
+                if (buf == NULL) {
+                    return -1;
+                }
                 READ_ERRCHECK(fd, buf, elsize);
                 totreadlen += elsize;
                 list_append(l, buf);
@@ -1317,7 +1386,7 @@ int list_restore_filedescriptor(list_t *restrict l, int fd, size_t *restrict len
     return 0;
 }
 
-int list_dump_file(const list_t *restrict l, const char *restrict filename, size_t *restrict len) {
+int list_dump_file(const list_t *simclist_restrict l, const char *simclist_restrict filename, size_t *simclist_restrict len) {
     int fd, mode;
     size_t sizetoret;
     mode = O_RDWR | O_CREAT | O_TRUNC;
@@ -1333,7 +1402,7 @@ int list_dump_file(const list_t *restrict l, const char *restrict filename, size
     return sizetoret;
 }
 
-int list_restore_file(list_t *restrict l, const char *restrict filename, size_t *restrict len) {
+int list_restore_file(list_t *simclist_restrict l, const char *simclist_restrict filename, size_t *simclist_restrict len) {
     int fd;
     size_t totdata;
 
@@ -1348,7 +1417,7 @@ int list_restore_file(list_t *restrict l, const char *restrict filename, size_t 
 #endif /* ifdef SIMCLIST_DUMPRESTORE */
 
 
-static int list_drop_elem(list_t *restrict l, struct list_entry_s *tmp, unsigned int pos) {
+static int list_drop_elem(list_t *simclist_restrict l, struct list_entry_s *tmp, unsigned int pos) {
     if (tmp == NULL) return -1;
 
     /* fix mid pointer. This is wrt the PRE situation */
@@ -1367,7 +1436,7 @@ static int list_drop_elem(list_t *restrict l, struct list_entry_s *tmp, unsigned
     if (l->attrs.copy_data && tmp->data != NULL)
         free(tmp->data);
 
-    if (l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS) {
+    if (l->spareels != NULL && l->spareelsnum < SIMCLIST_MAX_SPARE_ELEMS) {
         l->spareels[l->spareelsnum++] = tmp;
     } else {
         free(tmp);
@@ -1445,7 +1514,7 @@ list_hash_t list_hashcomputer_string(const void *el) {
 
 
 #ifndef NDEBUG
-static int list_repOk(const list_t *restrict l) {
+static int list_repOk(const list_t *simclist_restrict l) {
     int ok, i;
     struct list_entry_s *s;
 
@@ -1477,7 +1546,7 @@ static int list_repOk(const list_t *restrict l) {
     return ok;
 }
 
-static int list_attrOk(const list_t *restrict l) {
+static int list_attrOk(const list_t *simclist_restrict l) {
     int ok;
 
     ok = (l->attrs.copy_data == 0 || l->attrs.meter != NULL);

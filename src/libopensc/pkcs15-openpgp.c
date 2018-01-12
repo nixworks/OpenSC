@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,11 +33,8 @@
 #include "pkcs15.h"
 #include "log.h"
 
-#ifdef _WIN32
-typedef USHORT ushort;
-#endif
-
-int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
+static int sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *);
 
 
 #define	PGP_USER_PIN_FLAGS	(SC_PKCS15_PIN_FLAG_CASE_SENSITIVE \
@@ -44,6 +43,8 @@ int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
 #define PGP_ADMIN_PIN_FLAGS	(PGP_USER_PIN_FLAGS \
 				| SC_PKCS15_PIN_FLAG_UNBLOCK_DISABLED \
 				| SC_PKCS15_PIN_FLAG_SO_PIN)
+
+#define PGP_NUM_PRIVDO       4
 
 typedef struct _pgp_pin_cfg {
 	const char	*label;
@@ -57,16 +58,16 @@ typedef struct _pgp_pin_cfg {
  * "Signature PIN2 & "Encryption PIN" are two different PINs - not sync'ed by hardware
  */
 static const pgp_pin_cfg_t	pin_cfg_v1[3] = {
-	{ "Signature PIN",  0x01, PGP_USER_PIN_FLAGS,  6, 0 },	// used for PSO:CDS
 	{ "Encryption PIN", 0x02, PGP_USER_PIN_FLAGS,  6, 1 },	// used for PSO:DEC, INT-AUT, {GET,PUT} DATA
+	{ "Signature PIN",  0x01, PGP_USER_PIN_FLAGS,  6, 0 },	// used for PSO:CDS
 	{ "Admin PIN",      0x03, PGP_ADMIN_PIN_FLAGS, 8, 2 }
 };
 /* OpenPGP cards v2:
  * "User PIN (sig)" & "User PIN" are the same PIN, but use different references depending on action
  */
 static const pgp_pin_cfg_t	pin_cfg_v2[3] = {
-	{ "User PIN (sig)", 0x01, PGP_USER_PIN_FLAGS,  6, 0 },	// used for PSO:CDS
 	{ "User PIN",       0x02, PGP_USER_PIN_FLAGS,  6, 0 },	// used for PSO:DEC, INT-AUT, {GET,PUT} DATA
+	{ "User PIN (sig)", 0x01, PGP_USER_PIN_FLAGS,  6, 0 },	// used for PSO:CDS
 	{ "Admin PIN",      0x03, PGP_ADMIN_PIN_FLAGS, 8, 2 }
 };
 
@@ -100,7 +101,7 @@ static const pgp_key_cfg_t key_cfg[3] = {
 
 
 typedef struct _pgp_manuf_map {
-	ushort		id;
+	unsigned short		id;
 	const char	*name;
 } pgp_manuf_map_t;
 
@@ -110,6 +111,9 @@ static const pgp_manuf_map_t manuf_map[] = {
 	{ 0x0003, "OpenFortress"     },
 	{ 0x0004, "Wewid AB"         },
 	{ 0x0005, "ZeitControl"      },
+	{ 0x0006, "Yubico"           },
+	{ 0x0007, "OpenKMS"          },
+	{ 0x0008, "LogoEmail"        },
 	{ 0x002A, "Magrathea"        },
 	{ 0xF517, "FSIJ"             },
 	{ 0x0000, "test card"        },
@@ -155,7 +159,8 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 	u8		c4data[10];
 	u8		c5data[70];
 	int		r, i;
-	const pgp_pin_cfg_t *pin_cfg = (card->type == SC_CARD_TYPE_OPENPGP_V2) ? pin_cfg_v2 : pin_cfg_v1;
+	const pgp_pin_cfg_t *pin_cfg = (card->type == SC_CARD_TYPE_OPENPGP_V2 || card->type == SC_CARD_TYPE_OPENPGP_GNUK)
+	                               ? pin_cfg_v2 : pin_cfg_v1;
 	sc_path_t path;
 	sc_file_t *file;
 
@@ -164,7 +169,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 
 	/* card->serialnr = 2 byte manufacturer_id + 4 byte serial_number */
 	if (card->serialnr.len > 0) {
-		ushort manuf_id = bebytes2ushort(card->serialnr.value);
+		unsigned short manuf_id = bebytes2ushort(card->serialnr.value);
 		int j;
 
 		sc_bin_to_hex(card->serialnr.value, card->serialnr.len, string, sizeof(string)-1, 0);
@@ -211,7 +216,7 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 
 		pin_info.auth_type = SC_PKCS15_PIN_AUTH_TYPE_PIN;
 		pin_info.auth_id.len      = 1;
-		pin_info.auth_id.value[0] = i + 1;
+		pin_info.auth_id.value[0] = pin_cfg[i].reference;
 		pin_info.attrs.pin.reference     = pin_cfg[i].reference;
 		pin_info.attrs.pin.flags         = pin_cfg[i].flags;
 		pin_info.attrs.pin.type          = SC_PKCS15_PIN_TYPE_UTF8;
@@ -220,11 +225,16 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 		pin_info.attrs.pin.max_length    = c4data[1 + pin_cfg[i].do_index];
 		pin_info.attrs.pin.pad_char      = '\0';
 		pin_info.tries_left = c4data[4 + pin_cfg[i].do_index];
+		pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 
 		sc_format_path("3F00", &pin_info.path);
 
 		strlcpy(pin_obj.label, pin_cfg[i].label, sizeof(pin_obj.label));
 		pin_obj.flags = SC_PKCS15_CO_FLAG_MODIFIABLE | SC_PKCS15_CO_FLAG_PRIVATE;
+		if (i < 2) {
+			pin_obj.auth_id.len = 1;
+			pin_obj.auth_id.value[0] = 3;
+		}
 
 		r = sc_pkcs15emu_add_pin_obj(p15card, &pin_obj, &pin_info);
 		if (r < 0)
@@ -358,22 +368,76 @@ sc_pkcs15emu_openpgp_init(sc_pkcs15_card_t *p15card)
 			goto failed;
 	}
 
-	return 0;
+	/* PKCS#15 DATA object from OpenPGP private DOs */
+	sc_pkcs15emu_openpgp_add_data(p15card);
 
-failed:	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Failed to initialize OpenPGP emulation: %s\n",
-			sc_strerror(r));
+failed:
+	if (r < 0) {
+		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+				"Failed to initialize OpenPGP emulation: %s\n",
+				sc_strerror(r));
+	}
+
 	return r;
+}
+
+static int
+sc_pkcs15emu_openpgp_add_data(sc_pkcs15_card_t *p15card)
+{
+	sc_context_t *ctx = p15card->card->ctx;
+	int i, r;
+
+	LOG_FUNC_CALLED(ctx);
+	/* There is 4 private DO from 0101 to 0104 */
+	for (i = 1; i <= PGP_NUM_PRIVDO; i++) {
+		sc_pkcs15_data_info_t dat_info;
+		sc_pkcs15_object_t dat_obj;
+		char name[8];
+		char path[9];
+		u8 content[254];
+		memset(&dat_info, 0, sizeof(dat_info));
+		memset(&dat_obj, 0, sizeof(dat_obj));
+
+		snprintf(name, 8, "PrivDO%d", i);
+		snprintf(path, 9, "3F00010%d", i);
+
+		/* Check if the DO can be read.
+		 * We won't expose pkcs15 DATA object if DO is empty.
+		 */
+		r = read_file(p15card->card, path, content, sizeof(content));
+		if (r <= 0 ) {
+			sc_log(ctx, "Cannot read DO 010%d or there is no data in it", i);
+			/* Skip */
+			continue;
+		}
+		sc_format_path(path, &dat_info.path);
+		strlcpy(dat_obj.label, name, sizeof(dat_obj.label));
+		strlcpy(dat_info.app_label, name, sizeof(dat_info.app_label));
+
+		/* Add DATA object to slot protected by PIN2 (PW1 with Ref 0x82) */
+		dat_obj.flags = SC_PKCS15_CO_FLAG_PRIVATE | SC_PKCS15_CO_FLAG_MODIFIABLE;
+		dat_obj.auth_id.len = 1;
+		if (i == 1 || i == 3)
+			dat_obj.auth_id.value[0] = 2;
+		else
+			dat_obj.auth_id.value[0] = 3;
+
+		sc_log(ctx, "Add %s data object", name);
+		r = sc_pkcs15emu_add_data_object(p15card, &dat_obj, &dat_info);
+	}
+	LOG_FUNC_RETURN(ctx, r);
 }
 
 static int openpgp_detect_card(sc_pkcs15_card_t *p15card)
 {
-	if (p15card->card->type == SC_CARD_TYPE_OPENPGP_V1 || p15card->card->type == SC_CARD_TYPE_OPENPGP_V2)
+	if (p15card->card->type == SC_CARD_TYPE_OPENPGP_V1 || p15card->card->type == SC_CARD_TYPE_OPENPGP_V2
+	    || p15card->card->type == SC_CARD_TYPE_OPENPGP_GNUK)
 		return SC_SUCCESS;
 	else
 		return SC_ERROR_WRONG_CARD;
 }
 
-int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *p15card,
+int sc_pkcs15emu_openpgp_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid,
 				 sc_pkcs15emu_opt_t *opts)
 {
 	if (opts && opts->flags & SC_PKCS15EMU_FLAGS_NO_CHECK)

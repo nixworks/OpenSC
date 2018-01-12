@@ -20,6 +20,7 @@
 
 #include "config.h"
 
+#include "libopensc/sc-ossl-compat.h"
 #include <openssl/bn.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
@@ -28,6 +29,7 @@
 
 #include "libopensc/pkcs15.h"
 #include "common/compat_strlcpy.h"
+#include "common/compat_strlcat.h"
 #include "util.h"
 
 static const char *app_name = "cryptoflex-tool";
@@ -145,7 +147,7 @@ static int select_app_df(void)
 
 	strcpy(str, "3F00");
 	if (opt_appdf != NULL)
-		strcat(str, opt_appdf);
+		strlcat(str, opt_appdf, sizeof str);
 	sc_format_path(str, &path);
 	r = sc_select_file(card, &path, &file);
 	if (r) {
@@ -216,8 +218,8 @@ static int parse_public_key(const u8 *key, size_t keysize, RSA *rsa)
 	if (e == NULL)
 		return -1;
 	cf2bn(p, 4, e);
-	rsa->n = n;
-	rsa->e = e;
+	if (RSA_set0_key(rsa, n, e, NULL) != 1)
+	    return -1;
 	return 0;
 }
 
@@ -225,6 +227,8 @@ static int gen_d(RSA *rsa)
 {
 	BN_CTX *bnctx;
 	BIGNUM *r0, *r1, *r2;
+	const BIGNUM *rsa_p, *rsa_q, *rsa_n, *rsa_e, *rsa_d;
+	BIGNUM *rsa_n_new, *rsa_e_new, *rsa_d_new;
 
 	bnctx = BN_CTX_new();
 	if (bnctx == NULL)
@@ -233,13 +237,25 @@ static int gen_d(RSA *rsa)
 	r0 = BN_CTX_get(bnctx);
 	r1 = BN_CTX_get(bnctx);
 	r2 = BN_CTX_get(bnctx);
-	BN_sub(r1, rsa->p, BN_value_one());
-	BN_sub(r2, rsa->q, BN_value_one());
+	RSA_get0_key(rsa, &rsa_n, &rsa_e, &rsa_d);
+	RSA_get0_factors(rsa, &rsa_p, &rsa_q);
+
+	BN_sub(r1, rsa_p, BN_value_one());
+	BN_sub(r2, rsa_q, BN_value_one());
 	BN_mul(r0, r1, r2, bnctx);
-	if ((rsa->d = BN_mod_inverse(NULL, rsa->e, r0, bnctx)) == NULL) {
+	if ((rsa_d_new = BN_mod_inverse(NULL, rsa_e, r0, bnctx)) == NULL) {
 		fprintf(stderr, "BN_mod_inverse() failed.\n");
 		return -1;
 	}
+
+	/* RSA_set0_key will free previous value, and replace with new value
+	 * Thus the need to copy the contents of rsa_n and rsa_e
+	 */
+	rsa_n_new = BN_dup(rsa_n);
+	rsa_e_new = BN_dup(rsa_e);
+	if (RSA_set0_key(rsa, rsa_n_new, rsa_e_new, rsa_d_new) != 1)
+		return -1;
+
 	BN_CTX_end(bnctx);
 	BN_CTX_free(bnctx);
 	return 0;
@@ -287,11 +303,11 @@ static int parse_private_key(const u8 *key, size_t keysize, RSA *rsa)
 	cf2bn(p, base, dmq1);
 	p += base;
 
-	rsa->p = bn_p;
-	rsa->q = q;
-	rsa->dmp1 = dmp1;
-	rsa->dmq1 = dmq1;
-	rsa->iqmp = iqmp;
+	
+	if (RSA_set0_factors(rsa, bn_p, q) != 1)
+		return -1;
+	if (RSA_set0_crt_params(rsa, dmp1, dmq1, iqmp) != 1)
+		return -1;
 	if (gen_d(rsa))
 		return -1;
 
@@ -600,8 +616,10 @@ static int create_key_files(void)
 	sc_file_add_acl_entry(file, SC_AC_OP_INVALIDATE, SC_AC_CHV, 1);
 	sc_file_add_acl_entry(file, SC_AC_OP_REHABILITATE, SC_AC_CHV, 1);
 
-	if (select_app_df())
+	if (select_app_df()) {
+		sc_file_free(file);
 		return 1;
+	}
 	r = sc_create_file(card, file);
 	sc_file_free(file);
 	if (r) {
@@ -641,12 +659,13 @@ static int read_rsa_privkey(RSA **rsa_out)
 
 static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 {
-	u8 buf[512], *p = buf;
+	u8 buf[1024], *p = buf;
 	u8 bnbuf[256];
 	int base = 0;
 	int r;
+	const BIGNUM *rsa_p, *rsa_q, *rsa_dmp1, *rsa_dmq1, *rsa_iqmp;
 
-	switch (BN_num_bits(rsa->n)) {
+	switch (RSA_bits(rsa)) {
 	case 512:
 		base = 32;
 		break;
@@ -667,7 +686,10 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 	*p++ = (5 * base + 3) >> 8;
 	*p++ = (5 * base + 3) & 0xFF;
 	*p++ = opt_key_num;
-	r = bn2cf(rsa->p, bnbuf);
+
+	RSA_get0_factors(rsa, &rsa_p, &rsa_q);
+
+	r = bn2cf(rsa_p, bnbuf);
 	if (r != base) {
 		fprintf(stderr, "Invalid private key.\n");
 		return 2;
@@ -675,7 +697,7 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 	memcpy(p, bnbuf, base);
 	p += base;
 
-	r = bn2cf(rsa->q, bnbuf);
+	r = bn2cf(rsa_q, bnbuf);
 	if (r != base) {
 		fprintf(stderr, "Invalid private key.\n");
 		return 2;
@@ -683,7 +705,9 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 	memcpy(p, bnbuf, base);
 	p += base;
 
-	r = bn2cf(rsa->iqmp, bnbuf);
+	RSA_get0_crt_params(rsa, &rsa_dmp1, &rsa_dmq1, &rsa_iqmp);
+
+	r = bn2cf(rsa_iqmp, bnbuf);
 	if (r != base) {
 		fprintf(stderr, "Invalid private key.\n");
 		return 2;
@@ -691,7 +715,7 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 	memcpy(p, bnbuf, base);
 	p += base;
 
-	r = bn2cf(rsa->dmp1, bnbuf);
+	r = bn2cf(rsa_dmp1, bnbuf);
 	if (r != base) {
 		fprintf(stderr, "Invalid private key.\n");
 		return 2;
@@ -699,7 +723,7 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 	memcpy(p, bnbuf, base);
 	p += base;
 
-	r = bn2cf(rsa->dmq1, bnbuf);
+	r = bn2cf(rsa_dmq1, bnbuf);
 	if (r != base) {
 		fprintf(stderr, "Invalid private key.\n");
 		return 2;
@@ -715,12 +739,13 @@ static int encode_private_key(RSA *rsa, u8 *key, size_t *keysize)
 
 static int encode_public_key(RSA *rsa, u8 *key, size_t *keysize)
 {
-	u8 buf[512], *p = buf;
+	u8 buf[1024], *p = buf;
 	u8 bnbuf[256];
 	int base = 0;
 	int r;
+	const BIGNUM *rsa_n, *rsa_e;
 
-	switch (BN_num_bits(rsa->n)) {
+	switch (RSA_bits(rsa)) {
 	case 512:
 		base = 32;
 		break;
@@ -741,7 +766,9 @@ static int encode_public_key(RSA *rsa, u8 *key, size_t *keysize)
 	*p++ = (5 * base + 7) >> 8;
 	*p++ = (5 * base + 7) & 0xFF;
 	*p++ = opt_key_num;
-	r = bn2cf(rsa->n, bnbuf);
+
+	RSA_get0_key(rsa, &rsa_n, &rsa_e, NULL);
+	r = bn2cf(rsa_n, bnbuf);
 	if (r != 2*base) {
 		fprintf(stderr, "Invalid public key.\n");
 		return 2;
@@ -755,7 +782,7 @@ static int encode_public_key(RSA *rsa, u8 *key, size_t *keysize)
 	memset(bnbuf, 0, 2*base);
 	memcpy(p, bnbuf, 2*base);
 	p += 2*base;
-	r = bn2cf(rsa->e, bnbuf);
+	r = bn2cf(rsa_e, bnbuf);
 	memcpy(p, bnbuf, 4);
 	p += 4;
 
@@ -945,13 +972,13 @@ static int create_pin(void)
 	}
 	strcpy(buf, "3F00");
 	if (opt_appdf != NULL)
-		strcat(buf, opt_appdf);
+		strlcat(buf, opt_appdf, sizeof buf);
 	sc_format_path(buf, &path);
 
 	return create_pin_file(&path, opt_pin_num, "");
 }
 
-int main(int argc, char * const argv[])
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int action_count = 0;

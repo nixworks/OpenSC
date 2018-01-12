@@ -34,6 +34,12 @@
 		<title>Options</title>
 		<para>
 			<variablelist>
+                                <varlistentry>
+                                        <term>
+                                                <option>--version</option>,
+                                        </term>
+                                        <listitem><para>Print the OpenSC package release version.</para></listitem>
+                                </varlistentry>
 				<varlistentry>
 					<term>
 						<option>--aid</option> <replaceable>aid</replaceable>
@@ -62,7 +68,8 @@
 						<option>--input</option> <replaceable>file</replaceable>,
 						<option>-i</option> <replaceable>file</replaceable>
 					</term>
-					<listitem><para>Specifies the input file to use.</para></listitem>
+					<listitem><para>Specifies the input file to use. Defaults to stdin if
+					not specified.</para></listitem>
 				</varlistentry>
 
 				<varlistentry>
@@ -78,7 +85,8 @@
 						<option>--output</option> <replaceable>file</replaceable>,
 						<option>-o</option> <replaceable>file</replaceable>
 					</term>
-					<listitem><para>Any output will be sent to the specified file.</para></listitem>
+					<listitem><para>Any output will be sent to the specified file. Defaults
+					to stdout if not specified.</para></listitem>
 				</varlistentry>
 
 				<varlistentry>
@@ -161,6 +169,18 @@
 
 				<varlistentry>
 					<term>
+						<option>--signature-format</option>,
+						<option>--f</option>
+					</term>
+					<listitem><para>When signing with ECDSA key this option indicates
+					to <command>pkcs15-crypt</command> the signature output format.
+					Possible values are 'rs'(default) -- two concatanated
+					integers (PKCS#11), 'sequence' or 'openssl' -- DER encoded sequence
+					of two integeres (OpenSSL).</para></listitem>
+				</varlistentry>
+
+				<varlistentry>
+					<term>
 						<option>--verbose</option>,
 						<option>-v</option>
 					</term>
@@ -168,7 +188,6 @@
 					verbose. Specify this flag several times to enable debug output
 					in the OpenSC library.</para></listitem>
 				</varlistentry>
-
 			</variablelist>
 		</para>
 	</refsect1>

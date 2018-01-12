@@ -2,10 +2,26 @@
  * Convenience pkcs11 library that can be linked into an application,
  * and will bind to a specific pkcs11 module.
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -34,10 +50,15 @@ C_LoadModule(const char *mspec, CK_FUNCTION_LIST_PTR_PTR funcs)
 	sc_pkcs11_module_t *mod;
 	CK_RV rv, (*c_get_function_list)(CK_FUNCTION_LIST_PTR_PTR);
 	mod = calloc(1, sizeof(*mod));
+	if (mod == NULL) {
+		return NULL;
+	}
 	mod->_magic = MAGIC;
 
-	if (mspec == NULL)
+	if (mspec == NULL) {
+		free(mod);
 		return NULL;
+	}
 	mod->handle = sc_dlopen(mspec);
 	if (mod->handle == NULL) {
 		fprintf(stderr, "sc_dlopen failed: %s\n", sc_dlerror());
@@ -52,10 +73,14 @@ C_LoadModule(const char *mspec, CK_FUNCTION_LIST_PTR_PTR funcs)
 	rv = c_get_function_list(funcs);
 	if (rv == CKR_OK)
 		return (void *) mod;
-	else
+	else {
 		fprintf(stderr, "C_GetFunctionList failed %lx", rv);
+		rv = C_UnloadModule((void *) mod);
+		if (rv == CKR_OK)
+			mod = NULL; /* already freed */
+	}
 failed:
-	C_UnloadModule((void *) mod);
+	free(mod);
 	return NULL;
 }
 
@@ -72,7 +97,7 @@ C_UnloadModule(void *module)
 	if (!mod || mod->_magic != MAGIC)
 		return CKR_ARGUMENTS_BAD;
 
-	if (sc_dlclose(mod->handle) < 0)
+	if (mod->handle != NULL && sc_dlclose(mod->handle) < 0)
 		return CKR_FUNCTION_FAILED;
 
 	memset(mod, 0, sizeof(*mod));

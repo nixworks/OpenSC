@@ -124,7 +124,6 @@ extern "C" {
 #define SC_ERROR_SM_SESSION_ALREADY_ACTIVE	-1611
 #define SC_ERROR_SM_INVALID_CHECKSUM		-1612
 
-
 /* Errors that do not fit the categories above */
 #define SC_ERROR_UNKNOWN			-1900
 #define SC_ERROR_PKCS15_APP_NOT_FOUND		-1901

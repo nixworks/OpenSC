@@ -47,7 +47,8 @@ static sc_pkcs11_mechanism_type_t find_mechanism = {
 	NULL,		/* decrypt_init */
 	NULL,		/* decrypt */
 	NULL,		/* derive */
-	NULL		/* mech_data */
+	NULL,		/* mech_data */
+	NULL,		/* free_mech_data */
 };
 
 static void
@@ -113,14 +114,7 @@ CK_RV sc_create_object_int(CK_SESSION_HANDLE hSession,	/* the session's handle *
 		goto out;
 	}
 
-#if 0
-/* TODO DEE what should we check here */
-	if (!(session->flags & CKF_RW_SESSION)) {
-		rv = CKR_SESSION_READ_ONLY;
-		goto out;
-	}
-#endif
-	card = session->slot->card;
+	card = session->slot->p11card;
 	if (card->framework->create_object == NULL)
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
 	else
@@ -339,7 +333,7 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	if (rv != CKR_OK)
 		goto out;
 
-	sc_log(context, "C_FindObjectsInit(slot = %d)\n", session->slot->id);
+	sc_log(context, "C_FindObjectsInit(slot = %lu)\n", session->slot->id);
 	dump_template(SC_LOG_DEBUG_NORMAL, "C_FindObjectsInit()", pTemplate, ulCount);
 
 	rv = session_start_operation(session, SC_PKCS11_OPERATION_FIND,
@@ -368,8 +362,9 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 			if (object->ops->get_attribute(session, object, &private_attribute) != CKR_OK)
 			        continue;
 			if (is_private) {
-				sc_log(context, "Object %d/%d: Private object and not logged in.",
-					 slot->id, object->handle);
+				sc_log(context,
+				       "Object %lu/%lu: Private object and not logged in.",
+				       slot->id, object->handle);
 				continue;
 			}
 		}
@@ -379,20 +374,23 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		for (j = 0; j < ulCount; j++) {
 			rv = object->ops->cmp_attribute(session, object, &pTemplate[j]);
 			if (rv == 0) {
-				sc_log(context, "Object %d/%d: Attribute 0x%x does NOT match.",
-					 slot->id, object->handle, pTemplate[j].type);
+				sc_log(context,
+				       "Object %lu/%lu: Attribute 0x%lx does NOT match.",
+				       slot->id, object->handle, pTemplate[j].type);
 				match = 0;
 				break;
 			}
 
 			if (context->debug >= 4) {
-				sc_log(context, "Object %d/%d: Attribute 0x%x matches.",
-					 slot->id, object->handle, pTemplate[j].type);
+				sc_log(context,
+				       "Object %lu/%lu: Attribute 0x%lx matches.",
+				       slot->id, object->handle, pTemplate[j].type);
 			}
 		}
 
 		if (match) {
-			sc_log(context, "Object %d/%d matches\n", slot->id, object->handle);
+			sc_log(context, "Object %lu/%lu matches\n", slot->id,
+			       object->handle);
 			/* Realloc handles - remove restriction on only 32 matching objects -dee */
 			if (operation->num_handles >= operation->allocated_handles) {
 				operation->allocated_handles += SC_PKCS11_FIND_INC_HANDLES;
@@ -401,7 +399,7 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 					sizeof(CK_OBJECT_HANDLE) * operation->allocated_handles);
 				if (operation->handles == NULL) {
 					rv = CKR_HOST_MEMORY;
-					break;
+					goto out;
 				}
 			}
 			operation->handles[operation->num_handles++] = object->handle;
@@ -518,6 +516,7 @@ C_Digest(CK_SESSION_HANDLE hSession,		/* the session's handle */
 {
 	CK_RV rv;
 	struct sc_pkcs11_session *session;
+	CK_ULONG  ulBuflen = 0;
 
 	rv = sc_pkcs11_lock();
 	if (rv != CKR_OK)
@@ -528,11 +527,26 @@ C_Digest(CK_SESSION_HANDLE hSession,		/* the session's handle */
 	if (rv != CKR_OK)
 		goto out;
 
-	rv = sc_pkcs11_md_update(session, pData, ulDataLen);
+	/* if pDigest == NULL, buffer size request */
+	if (pDigest) {
+	    /* As per PKCS#11 2.20 we need to check if buffer too small before update */
+	    rv = sc_pkcs11_md_final(session, NULL, &ulBuflen);
+	    if (rv != CKR_OK)
+		goto out;
+
+	    if (ulBuflen > *pulDigestLen) {
+	        *pulDigestLen = ulBuflen;
+		rv = CKR_BUFFER_TOO_SMALL;
+		goto out;
+	    }
+
+	    rv = sc_pkcs11_md_update(session, pData, ulDataLen);
+	}
 	if (rv == CKR_OK)
 		rv = sc_pkcs11_md_final(session, pDigest, pulDigestLen);
 
-out:	sc_log(context, "C_Digest() = %s", lookup_enum ( RV_T, rv ));
+out:
+	sc_log(context, "C_Digest() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
 	return rv;
 }
@@ -676,8 +690,12 @@ C_Sign(CK_SESSION_HANDLE hSession,		/* the session's handle */
 	}
 
 	rv = sc_pkcs11_sign_update(session, pData, ulDataLen);
-	if (rv == CKR_OK)
-		rv = sc_pkcs11_sign_final(session, pSignature, pulSignatureLen);
+	if (rv == CKR_OK) {
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK)
+			rv = sc_pkcs11_sign_final(session, pSignature, pulSignatureLen);
+		rv = reset_login_state(session->slot, rv);
+	}
 
 out:
 	sc_log(context, "C_Sign() = %s", lookup_enum ( RV_T, rv ));
@@ -737,7 +755,10 @@ C_SignFinal(CK_SESSION_HANDLE hSession,		/* the session's handle */
 		*pulSignatureLen = length;
 		rv = pSignature ? CKR_BUFFER_TOO_SMALL : CKR_OK;
 	} else {
-		rv = sc_pkcs11_sign_final(session, pSignature, pulSignatureLen);
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK)
+			rv = sc_pkcs11_sign_final(session, pSignature, pulSignatureLen);
+		rv = reset_login_state(session->slot, rv);
 	}
 
 out:
@@ -752,57 +773,7 @@ C_SignRecoverInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		CK_MECHANISM_PTR pMechanism,	/* the signature mechanism */
 		CK_OBJECT_HANDLE hKey)		/* handle of the signature key */
 {
-	CK_RV rv;
-	CK_BBOOL can_sign;
-	CK_KEY_TYPE key_type;
-	CK_ATTRIBUTE sign_attribute = { CKA_SIGN, &can_sign, sizeof(can_sign) };
-	CK_ATTRIBUTE key_type_attr = { CKA_KEY_TYPE, &key_type, sizeof(key_type) };
-	struct sc_pkcs11_session *session;
-	struct sc_pkcs11_object *object;
-
-	/* FIXME #47: C_SignRecover is not implemented */
 	return CKR_FUNCTION_NOT_SUPPORTED;
-
-	if (pMechanism == NULL_PTR)
-		return CKR_ARGUMENTS_BAD;
-
-	rv = sc_pkcs11_lock();
-	if (rv != CKR_OK)
-		return rv;
-
-	rv = get_object_from_session(hSession, hKey, &session, &object);
-	if (rv != CKR_OK) {
-		if (rv == CKR_OBJECT_HANDLE_INVALID)
-			rv = CKR_KEY_HANDLE_INVALID;
-		goto out;
-	}
-
-	if (object->ops->sign == NULL_PTR) {
-		rv = CKR_KEY_TYPE_INCONSISTENT;
-		goto out;
-	}
-
-	rv = object->ops->get_attribute(session, object, &sign_attribute);
-	if (rv != CKR_OK || !can_sign) {
-		rv = CKR_KEY_TYPE_INCONSISTENT;
-		goto out;
-	}
-	rv = object->ops->get_attribute(session, object, &key_type_attr);
-	if (rv != CKR_OK) {
-		rv = CKR_KEY_TYPE_INCONSISTENT;
-		goto out;
-	}
-
-	/* XXX: need to tell the signature algorithm that we want
-	 * to recover the signature */
-	sc_log(context, "SignRecover operation initialized\n");
-
-	rv = sc_pkcs11_sign_init(session, pMechanism, object, key_type);
-
-out:
-	sc_log(context, "C_SignRecoverInit() = %sn", lookup_enum ( RV_T, rv ));
-	sc_pkcs11_unlock();
-	return rv;
 }
 
 
@@ -900,7 +871,8 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 
 	rv = sc_pkcs11_decr_init(session, pMechanism, object, key_type);
 
-out:	sc_log(context, "C_DecryptInit() = %s", lookup_enum ( RV_T, rv ));
+out:
+	sc_log(context, "C_DecryptInit() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
 	return rv;
 }
@@ -919,9 +891,14 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		return rv;
 
 	rv = get_session(hSession, &session);
-	if (rv == CKR_OK)
-		rv = sc_pkcs11_decr(session, pEncryptedData, ulEncryptedDataLen,
-				pData, pulDataLen);
+	if (rv == CKR_OK) {
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK) {
+			rv = sc_pkcs11_decr(session, pEncryptedData,
+					ulEncryptedDataLen, pData, pulDataLen);
+		}
+		rv = reset_login_state(session->slot, rv);
+	}
 
 	sc_log(context, "C_Decrypt() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
@@ -1024,13 +1001,17 @@ CK_RV C_GenerateKeyPair(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	}
 
 	slot = session->slot;
-	if (slot->card->framework->gen_keypair == NULL)
+	if (slot->p11card->framework->gen_keypair == NULL)
 		rv = CKR_FUNCTION_NOT_SUPPORTED;
-	else
-		rv = slot->card->framework->gen_keypair(slot, pMechanism,
-				pPublicKeyTemplate, ulPublicKeyAttributeCount,
-				pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
-				phPublicKey, phPrivateKey);
+	else {
+		rv = restore_login_state(slot);
+		if (rv == CKR_OK)
+			rv = slot->p11card->framework->gen_keypair(slot, pMechanism,
+					pPublicKeyTemplate, ulPublicKeyAttributeCount,
+					pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+					phPublicKey, phPrivateKey);
+		rv = reset_login_state(session->slot, rv);
+	}
 
 out:
 	sc_pkcs11_unlock();
@@ -1120,14 +1101,17 @@ CK_RV C_DeriveKey(CK_SESSION_HANDLE hSession,	/* the session's handle */
 
 		rv = get_object_from_session(hSession, *phKey, &session, &key_object);
 		if (rv != CKR_OK) {
-		if (rv == CKR_OBJECT_HANDLE_INVALID)
-			rv = CKR_KEY_HANDLE_INVALID;
+			if (rv == CKR_OBJECT_HANDLE_INVALID)
+				rv = CKR_KEY_HANDLE_INVALID;
 			goto out;
 		}
 
-		rv = sc_pkcs11_deri(session, pMechanism, object, key_type,
-			hSession, *phKey, key_object);
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK)
+			rv = sc_pkcs11_deri(session, pMechanism, object, key_type,
+					hSession, *phKey, key_object);
 		/* TODO if (rv != CK_OK) need to destroy the object */
+		rv = reset_login_state(session->slot, rv);
 
 		break;
 	    default:
@@ -1161,10 +1145,10 @@ CK_RV C_GenerateRandom(CK_SESSION_HANDLE hSession,	/* the session's handle */
 	rv = get_session(hSession, &session);
 	if (rv == CKR_OK) {
 		slot = session->slot;
-		if (slot->card->framework->get_random == NULL)
+		if (slot->p11card->framework->get_random == NULL)
 			rv = CKR_RANDOM_NO_RNG;
 		else
-			rv = slot->card->framework->get_random(slot, RandomData, ulRandomLen);
+			rv = slot->p11card->framework->get_random(slot, RandomData, ulRandomLen);
 	}
 
 	sc_pkcs11_unlock();
@@ -1188,10 +1172,6 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 #ifndef ENABLE_OPENSSL
 	return CKR_FUNCTION_NOT_SUPPORTED;
 #else
-#if 0
-	CK_BBOOL can_verify;
-	CK_ATTRIBUTE verify_attribute = { CKA_VERIFY, &can_verify, sizeof(can_verify) };
-#endif
 	CK_KEY_TYPE key_type;
 	CK_ATTRIBUTE key_type_attr = { CKA_KEY_TYPE, &key_type, sizeof(key_type) };
 	CK_RV rv;
@@ -1212,13 +1192,6 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 			rv = CKR_KEY_HANDLE_INVALID;
 		goto out;
 	}
-#if 0
-	rv = object->ops->get_attribute(session, object, &verify_attribute);
-	if (rv != CKR_OK || !can_verify) {
-		rv = CKR_KEY_TYPE_INCONSISTENT;
-		goto out;
-	}
-#endif
 	rv = object->ops->get_attribute(session, object, &key_type_attr);
 	if (rv != CKR_OK) {
 		rv = CKR_KEY_TYPE_INCONSISTENT;
@@ -1227,7 +1200,8 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession,	/* the session's handle */
 
 	rv = sc_pkcs11_verif_init(session, pMechanism, object, key_type);
 
-out:	sc_log(context, "C_VerifyInit() = %s", lookup_enum ( RV_T, rv ));
+out:
+	sc_log(context, "C_VerifyInit() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
 	return rv;
 #endif
@@ -1254,10 +1228,15 @@ CK_RV C_Verify(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		goto out;
 
 	rv = sc_pkcs11_verif_update(session, pData, ulDataLen);
-	if (rv == CKR_OK)
-		rv = sc_pkcs11_verif_final(session, pSignature, ulSignatureLen);
+	if (rv == CKR_OK) {
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK)
+			rv = sc_pkcs11_verif_final(session, pSignature, ulSignatureLen);
+		rv = reset_login_state(session->slot, rv);
+	}
 
-out:	sc_log(context, "C_Verify() = %s", lookup_enum ( RV_T, rv ));
+out:
+	sc_log(context, "C_Verify() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
 	return rv;
 #endif
@@ -1302,8 +1281,12 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession,	/* the session's handle */
 		return rv;
 
 	rv = get_session(hSession, &session);
-	if (rv == CKR_OK)
-		rv = sc_pkcs11_verif_final(session, pSignature, ulSignatureLen);
+	if (rv == CKR_OK) {
+		rv = restore_login_state(session->slot);
+		if (rv == CKR_OK)
+			rv = sc_pkcs11_verif_final(session, pSignature, ulSignatureLen);
+		rv = reset_login_state(session->slot, rv);
+	}
 
 	sc_log(context, "C_VerifyFinal() = %s", lookup_enum ( RV_T, rv ));
 	sc_pkcs11_unlock();
@@ -1352,7 +1335,7 @@ int sc_pkcs11_any_cmp_attribute(struct sc_pkcs11_session *session, void *ptr, CK
 	if (temp_attr.ulValueLen <= sizeof(temp1))
 		temp_attr.pValue = temp1;
 	else {
-		temp2 = malloc(temp_attr.ulValueLen);
+		temp2 = calloc(1, temp_attr.ulValueLen);
 		if (temp2 == NULL)
 			return 0;
 		temp_attr.pValue = temp2;

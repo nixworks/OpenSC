@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <ctype.h>
@@ -47,11 +49,14 @@ const char *sc_get_version(void)
 
 int sc_hex_to_bin(const char *in, u8 *out, size_t *outlen)
 {
-	int err = 0;
-	size_t left, count = 0;
+	int err = SC_SUCCESS;
+	size_t left, count = 0, in_len;
 
-	assert(in != NULL && out != NULL && outlen != NULL);
-        left = *outlen;
+	if (in == NULL || out == NULL || outlen == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+	left = *outlen;
+	in_len = strlen(in);
 
 	while (*in != '\0') {
 		int byte = 0, nybbles = 2;
@@ -74,10 +79,17 @@ int sc_hex_to_bin(const char *in, u8 *out, size_t *outlen)
 			}
 			byte |= c;
 		}
+
+		/* Detect premature end of string before byte is complete */
+		if (in_len > 1 && *in == '\0' && nybbles >= 0) {
+			err = SC_ERROR_INVALID_ARGUMENTS;
+			break;
+		}
+
 		if (*in == ':' || *in == ' ')
 			in++;
 		if (left <= 0) {
-                        err = SC_ERROR_BUFFER_TOO_SMALL;
+			err = SC_ERROR_BUFFER_TOO_SMALL;
 			break;
 		}
 		out[count++] = (u8) byte;
@@ -108,7 +120,30 @@ int sc_bin_to_hex(const u8 *in, size_t in_len, char *out, size_t out_len,
 		pos += 2;
 	}
 	*pos = '\0';
-	return 0;
+	return SC_SUCCESS;
+}
+
+/*
+ * Right trim all non-printable characters
+ */
+size_t sc_right_trim(u8 *buf, size_t len) {
+
+	size_t i;
+
+	if (!buf)
+		return 0;
+
+	if (len > 0) {
+		for(i = len-1; i > 0; i--) {
+			if(!isprint(buf[i])) {
+				buf[i] = '\0';
+				len--;
+				continue;
+			}
+			break;
+		}
+	}
+	return len;
 }
 
 u8 *ulong2bebytes(u8 *buf, unsigned long x)
@@ -143,6 +178,13 @@ unsigned short bebytes2ushort(const u8 *buf)
 	if (buf == NULL)
 		return 0U;
 	return (unsigned short) (buf[0] << 8 | buf[1]);
+}
+
+unsigned short lebytes2ushort(const u8 *buf)
+{
+	if (buf == NULL)
+		return 0U;
+	return (unsigned short)buf[1] << 8 | (unsigned short)buf[0];
 }
 
 void sc_init_oid(struct sc_object_id *oid)
@@ -193,7 +235,9 @@ int sc_compare_oid(const struct sc_object_id *oid1, const struct sc_object_id *o
 {
 	int i;
 
-	assert(oid1 != NULL && oid2 != NULL);
+	if (oid1 == NULL || oid2 == NULL) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	for (i = 0; i < SC_MAX_OBJECT_ID_OCTETS; i++)   {
 		if (oid1->value[i] != oid2->value[i])
@@ -256,17 +300,18 @@ void sc_format_path(const char *str, sc_path_t *path)
 {
 	int type = SC_PATH_TYPE_PATH;
 
-	memset(path, 0, sizeof(*path));
-	if (*str == 'i' || *str == 'I') {
-		type = SC_PATH_TYPE_FILE_ID;
-		str++;
+	if (path) {
+		memset(path, 0, sizeof(*path));
+		if (*str == 'i' || *str == 'I') {
+			type = SC_PATH_TYPE_FILE_ID;
+			str++;
+		}
+		path->len = sizeof(path->value);
+		if (sc_hex_to_bin(str, path->value, &path->len) >= 0) {
+			path->type = type;
+		}
+		path->count = -1;
 	}
-	path->len = sizeof(path->value);
-	if (sc_hex_to_bin(str, path->value, &path->len) >= 0) {
-		path->type = type;
-	}
-	path->count = -1;
-	return;
 }
 
 int sc_append_path(sc_path_t *dest, const sc_path_t *src)
@@ -280,7 +325,7 @@ int sc_append_path_id(sc_path_t *dest, const u8 *id, size_t idlen)
 		return SC_ERROR_INVALID_ARGUMENTS;
 	memcpy(dest->value + dest->len, id, idlen);
 	dest->len += idlen;
-	return 0;
+	return SC_SUCCESS;
 }
 
 int sc_append_file_id(sc_path_t *dest, unsigned int fid)
@@ -391,28 +436,29 @@ int sc_file_add_acl_entry(sc_file_t *file, unsigned int operation,
 {
 	sc_acl_entry_t *p, *_new;
 
-	assert(file != NULL);
-	assert(operation < SC_MAX_AC_OPS);
+	if (file == NULL || operation >= SC_MAX_AC_OPS) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	switch (method) {
 	case SC_AC_NEVER:
 		sc_file_clear_acl_entries(file, operation);
 		file->acl[operation] = (sc_acl_entry_t *) 1;
-		return 0;
+		return SC_SUCCESS;
 	case SC_AC_NONE:
 		sc_file_clear_acl_entries(file, operation);
 		file->acl[operation] = (sc_acl_entry_t *) 2;
-		return 0;
+		return SC_SUCCESS;
 	case SC_AC_UNKNOWN:
 		sc_file_clear_acl_entries(file, operation);
 		file->acl[operation] = (sc_acl_entry_t *) 3;
-		return 0;
+		return SC_SUCCESS;
 	default:
 		/* NONE and UNKNOWN get zapped when a new AC is added.
 		 * If the ACL is NEVER, additional entries will be
 		 * dropped silently. */
 		if (file->acl[operation] == (sc_acl_entry_t *) 1)
-			return 0;
+			return SC_SUCCESS;
 		if (file->acl[operation] == (sc_acl_entry_t *) 2
 		 || file->acl[operation] == (sc_acl_entry_t *) 3)
 			file->acl[operation] = NULL;
@@ -422,7 +468,7 @@ int sc_file_add_acl_entry(sc_file_t *file, unsigned int operation,
 	 * of the card's AC with OpenSC's), don't add it again. */
 	for (p = file->acl[operation]; p != NULL; p = p->next) {
 		if ((p->method == method) && (p->key_ref == key_ref))
-			return 0;
+			return SC_SUCCESS;
 	}
 
 	_new = malloc(sizeof(sc_acl_entry_t));
@@ -435,13 +481,13 @@ int sc_file_add_acl_entry(sc_file_t *file, unsigned int operation,
 	p = file->acl[operation];
 	if (p == NULL) {
 		file->acl[operation] = _new;
-		return 0;
+		return SC_SUCCESS;
 	}
 	while (p->next != NULL)
 		p = p->next;
 	p->next = _new;
 
-	return 0;
+	return SC_SUCCESS;
 }
 
 const sc_acl_entry_t * sc_file_get_acl_entry(const sc_file_t *file,
@@ -458,8 +504,9 @@ const sc_acl_entry_t * sc_file_get_acl_entry(const sc_file_t *file,
 		SC_AC_UNKNOWN, SC_AC_KEY_REF_NONE, {{0, 0, 0, {0}}}, NULL
 	};
 
-	assert(file != NULL);
-	assert(operation < SC_MAX_AC_OPS);
+	if (file == NULL || operation >= SC_MAX_AC_OPS) {
+		return NULL;
+	}
 
 	p = file->acl[operation];
 	if (p == (sc_acl_entry_t *) 1)
@@ -476,8 +523,9 @@ void sc_file_clear_acl_entries(sc_file_t *file, unsigned int operation)
 {
 	sc_acl_entry_t *e;
 
-	assert(file != NULL);
-	assert(operation < SC_MAX_AC_OPS);
+	if (file == NULL || operation >= SC_MAX_AC_OPS) {
+		return;
+	}
 
 	e = file->acl[operation];
 	if (e == (sc_acl_entry_t *) 1 ||
@@ -508,7 +556,8 @@ sc_file_t * sc_file_new(void)
 void sc_file_free(sc_file_t *file)
 {
 	unsigned int i;
-	assert(sc_file_valid(file));
+	if (file == NULL || !sc_file_valid(file))
+		return;
 	file->magic = 0;
 	for (i = 0; i < SC_MAX_AC_OPS; i++)
 		sc_file_clear_acl_entries(file, i);
@@ -518,6 +567,8 @@ void sc_file_free(sc_file_t *file)
 		free(file->prop_attr);
 	if (file->type_attr)
 		free(file->type_attr);
+	if (file->encoded_content)
+		free(file->encoded_content);
 	free(file);
 }
 
@@ -527,7 +578,8 @@ void sc_file_dup(sc_file_t **dest, const sc_file_t *src)
 	const sc_acl_entry_t *e;
 	unsigned int op;
 
-	assert(sc_file_valid(src));
+	if (!sc_file_valid(src))
+		return;
 	*dest = NULL;
 	newf = sc_file_new();
 	if (newf == NULL)
@@ -560,10 +612,11 @@ void sc_file_dup(sc_file_t **dest, const sc_file_t *src)
 		goto err;
 	if (sc_file_set_type_attr(newf, src->type_attr, src->type_attr_len) < 0)
 		goto err;
+	if (sc_file_set_content(newf, src->encoded_content, src->encoded_content_len) < 0)
+		goto err;
 	return;
 err:
-	if (newf != NULL)
-		sc_file_free(newf);
+	sc_file_free(newf);
 	*dest = NULL;
 }
 
@@ -571,7 +624,9 @@ int sc_file_set_sec_attr(sc_file_t *file, const u8 *sec_attr,
 			 size_t sec_attr_len)
 {
 	u8 *tmp;
-	assert(sc_file_valid(file));
+	if (!sc_file_valid(file)) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	if (sec_attr == NULL) {
 		if (file->sec_attr != NULL)
@@ -599,14 +654,16 @@ int sc_file_set_prop_attr(sc_file_t *file, const u8 *prop_attr,
 			 size_t prop_attr_len)
 {
 	u8 *tmp;
-	assert(sc_file_valid(file));
+	if (!sc_file_valid(file)) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	if (prop_attr == NULL) {
 		if (file->prop_attr != NULL)
 			free(file->prop_attr);
 		file->prop_attr = NULL;
 		file->prop_attr_len = 0;
-		return 0;
+		return SC_SUCCESS;
 	 }
 	tmp = (u8 *) realloc(file->prop_attr, prop_attr_len);
 	if (!tmp) {
@@ -620,21 +677,23 @@ int sc_file_set_prop_attr(sc_file_t *file, const u8 *prop_attr,
 	memcpy(file->prop_attr, prop_attr, prop_attr_len);
 	file->prop_attr_len = prop_attr_len;
 
-	return 0;
+	return SC_SUCCESS;
 }
 
 int sc_file_set_type_attr(sc_file_t *file, const u8 *type_attr,
 			 size_t type_attr_len)
 {
 	u8 *tmp;
-	assert(sc_file_valid(file));
+	if (!sc_file_valid(file)) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	if (type_attr == NULL) {
 		if (file->type_attr != NULL)
 			free(file->type_attr);
 		file->type_attr = NULL;
 		file->type_attr_len = 0;
-		return 0;
+		return SC_SUCCESS;
 	 }
 	tmp = (u8 *) realloc(file->type_attr, type_attr_len);
 	if (!tmp) {
@@ -648,13 +707,46 @@ int sc_file_set_type_attr(sc_file_t *file, const u8 *type_attr,
 	memcpy(file->type_attr, type_attr, type_attr_len);
 	file->type_attr_len = type_attr_len;
 
-	return 0;
+	return SC_SUCCESS;
 }
 
+
+int sc_file_set_content(sc_file_t *file, const u8 *content,
+			 size_t content_len)
+{
+	u8 *tmp;
+	if (!sc_file_valid(file)) {
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	if (content == NULL) {
+		if (file->encoded_content != NULL)
+			free(file->encoded_content);
+		file->encoded_content = NULL;
+		file->encoded_content_len = 0;
+		return SC_SUCCESS;
+	}
+
+	tmp = (u8 *) realloc(file->encoded_content, content_len);
+	if (!tmp) {
+		if (file->encoded_content)
+			free(file->encoded_content);
+		file->encoded_content = NULL;
+		file->encoded_content_len = 0;
+		return SC_ERROR_OUT_OF_MEMORY;
+	}
+
+	file->encoded_content = tmp;
+	memcpy(file->encoded_content, content, content_len);
+	file->encoded_content_len = content_len;
+
+	return SC_SUCCESS;
+}
+
+
 int sc_file_valid(const sc_file_t *file) {
-#ifndef NDEBUG
-	assert(file != NULL);
-#endif
+	if (file == NULL)
+		return 0;
 	return file->magic == SC_FILE_MAGIC;
 }
 
@@ -726,12 +818,12 @@ int _sc_parse_atr(sc_reader_t *reader)
 		}
 	}
 	if (atr_len <= 0)
-		return 0;
+		return SC_SUCCESS;
 	if (n_hist > atr_len)
 		n_hist = atr_len;
 	reader->atr_info.hist_bytes_len = n_hist;
 	reader->atr_info.hist_bytes = p;
-	return 0;
+	return SC_SUCCESS;
 }
 
 void *sc_mem_alloc_secure(sc_context_t *ctx, size_t len)
@@ -741,34 +833,40 @@ void *sc_mem_alloc_secure(sc_context_t *ctx, size_t len)
 
     pointer = calloc(len, sizeof(unsigned char));
     if (!pointer)
-        return NULL;
+	return NULL;
 #ifdef HAVE_SYS_MMAN_H
-    /* TODO Windows support and mprotect too */
+    /* TODO mprotect */
     /* Do not swap the memory */
     if (mlock(pointer, len) >= 0)
-        locked = 1;
+	locked = 1;
+#endif
+#ifdef _WIN32
+	/* Do not swap the memory */
+	if (VirtualLock(pointer, len) != 0)
+		locked = 1;
 #endif
     if (!locked) {
-        if (ctx->paranoid_memory) {
-            sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, failing allocation because paranoid set");
-            free (pointer);
-            pointer = NULL;
-        } else {
-            sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, sensitive data may be paged to disk");
-        }
+	if (ctx->flags & SC_CTX_FLAG_PARANOID_MEMORY) {
+	    sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, failing allocation because paranoid set");
+	    free (pointer);
+	    pointer = NULL;
+	} else {
+	    sc_do_log (ctx, 0, NULL, 0, NULL, "cannot lock memory, sensitive data may be paged to disk");
+	}
     }
     return pointer;
 }
 
 void sc_mem_clear(void *ptr, size_t len)
 {
-#ifdef ENABLE_OPENSSL
 	/* FIXME: Bug in 1.0.0-beta series crashes with 0 length */
-	if (len > 0)
+	if (len > 0)   {
+#ifdef ENABLE_OPENSSL
 		OPENSSL_cleanse(ptr, len);
 #else
-	memset(ptr, 0, len);
+		memset(ptr, 0, len);
 #endif
+	}
 }
 
 int sc_mem_reverse(unsigned char *buf, size_t len)
@@ -785,7 +883,7 @@ int sc_mem_reverse(unsigned char *buf, size_t len)
 		*(buf + len - 1 - ii) = ch;
 	}
 
-	return 0;
+	return SC_SUCCESS;
 }
 
 static int
@@ -851,7 +949,7 @@ void sc_remote_data_init(struct sc_remote_data *rdata)
 
 static unsigned long  sc_CRC_tab32[256];
 static int sc_CRC_tab32_initialized = 0;
-unsigned sc_crc32(unsigned char *value, size_t len)
+unsigned sc_crc32(const unsigned char *value, size_t len)
 {
 	size_t ii, jj;
 	unsigned long crc;

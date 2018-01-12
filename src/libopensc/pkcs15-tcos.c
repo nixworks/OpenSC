@@ -18,13 +18,16 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 #include "common/compat_strlcpy.h"
+#include "common/compat_strlcat.h"
 #include "internal.h"
 #include "pkcs15.h"
 #include "cardctl.h"
@@ -32,6 +35,7 @@
 
 int sc_pkcs15emu_tcos_init_ex(
 	sc_pkcs15_card_t   *p15card,
+	struct sc_aid *,
 	sc_pkcs15emu_opt_t *opts);
 
 static int insert_cert(
@@ -204,6 +208,7 @@ static int insert_pin(
 	pin_info.attrs.pin.stored_length    = 16;
 	pin_info.attrs.pin.max_length       = 16;
 	pin_info.attrs.pin.pad_char         = '\0';
+	pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 	sc_format_path(path, &pin_info.path);
 
 	memset(&pin_obj, 0, sizeof(pin_obj));
@@ -260,8 +265,9 @@ static int insert_pin(
 static char *dirpath(char *dir, const char *path){
 	static char buf[SC_MAX_PATH_STRING_SIZE];
 
-	strcpy(buf,dir);
-	return strcat(buf,path);
+	strlcpy(buf,dir,sizeof buf);
+	strlcat(buf,path,sizeof buf);
+	return buf;
 }
 
 static int detect_netkey(
@@ -484,6 +490,7 @@ static int detect_unicard(
 
 int sc_pkcs15emu_tcos_init_ex(
 	sc_pkcs15_card_t   *p15card,
+	struct sc_aid *aid,
 	sc_pkcs15emu_opt_t *opts
 ){
 	sc_card_t         *card = p15card->card;

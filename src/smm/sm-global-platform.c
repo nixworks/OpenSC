@@ -42,98 +42,13 @@
 #include "libopensc/sm.h"
 #include "libopensc/log.h"
 #include "libopensc/asn1.h"
-#if 0
-#include "libopensc/hash-strings.h"
-#endif
 
 #include "sm-module.h"
-
-static const struct sc_asn1_entry c_asn1_authentic_card_response[4] = {
-	{ "number",	SC_ASN1_INTEGER,        SC_ASN1_TAG_INTEGER,    0, NULL, NULL },
-	{ "status",	SC_ASN1_INTEGER,        SC_ASN1_TAG_INTEGER,    0, NULL, NULL },
-	{ "data",       SC_ASN1_OCTET_STRING,	SC_ASN1_CTX | 2 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
-static const struct sc_asn1_entry c_asn1_card_response[2] = {
-	{ "cardResponse", SC_ASN1_STRUCT, SC_ASN1_CTX | 1 | SC_ASN1_CONS, 0, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
 
 int
 sm_gp_decode_card_answer(struct sc_context *ctx, struct sc_remote_data *rdata, unsigned char *out, size_t out_len)
 {
-#if 0
-	struct sc_asn1_entry asn1_authentic_card_response[4], asn1_card_response[2];
-	struct sc_hash *hash = NULL;
-	unsigned char *hex = NULL;
-	size_t hex_len;
-	int rv, offs;
-	unsigned char card_data[SC_MAX_APDU_BUFFER_SIZE];
-	size_t card_data_len = sizeof(card_data), len_left = 0;
-
-	LOG_FUNC_CALLED(ctx);
-
-	if (!out || !out_len)
-		LOG_FUNC_RETURN(ctx, 0);
-	if (strstr(str_data, "DATA="))   {
-		rv = sc_hash_parse(ctx, str_data, strlen(str_data), &hash);
-		LOG_TEST_RET(ctx, rv, "SM GP decode card answer: parse input data error");
-
-		str_data = sc_hash_get(hash, "DATA");
-	}
-
-	if (!strlen(str_data))
-		LOG_FUNC_RETURN(ctx, 0);
-
-	hex_len = strlen(str_data) / 2;
-	hex = calloc(1, hex_len);
-	if (!hex)
-		LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "SM GP decode card answer: hex allocate error");
-
-	sc_log(ctx, "SM GP decode card answer: hex length %i", hex_len);
-	rv = sc_hex_to_bin(str_data, hex, &hex_len);
-	LOG_TEST_RET(ctx, rv, "SM GP decode card answer: data 'HEX to BIN' conversion error");
-	sc_log(ctx, "SM GP decode card answer: hex length %i", hex_len);
-
-	if (hash)
-		sc_hash_free(hash);
-
-	for (offs = 0, len_left = hex_len; len_left; )   {
-		int num, status;
-
-		sc_copy_asn1_entry(c_asn1_authentic_card_response, asn1_authentic_card_response);
-		sc_copy_asn1_entry(c_asn1_card_response, asn1_card_response);
-		sc_format_asn1_entry(asn1_authentic_card_response + 0, &num, NULL, 0);
-		sc_format_asn1_entry(asn1_authentic_card_response + 1, &status, NULL, 0);
-		card_data_len = sizeof(card_data);
-		sc_format_asn1_entry(asn1_authentic_card_response + 2, &card_data, &card_data_len, 0);
-		sc_format_asn1_entry(asn1_card_response + 0, asn1_authentic_card_response, NULL, 0);
-
-		rv = sc_asn1_decode(ctx, asn1_card_response, hex + hex_len - len_left, len_left, NULL, &len_left);
-		if (rv) {
-			sc_log(ctx, "SM GP decode card answer: ASN.1 parse error: %s", sc_strerror(rv));
-			return rv;
-		}
-		if (status != 0x9000)
-			continue;
-
-		if (asn1_authentic_card_response[2].flags & SC_ASN1_PRESENT)   {
-			sc_log(ctx, "SM GP decode card answer: card_data_len %i", card_data_len);
-			if (out_len < offs + card_data_len)
-				LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "SM GP decode card answer: buffer too small");
-
-			memcpy(out + offs, card_data, card_data_len);
-			offs += card_data_len;
-		}
-
-		sc_log(ctx, "SM GP decode card answer: offs:%i,left:%i", offs, len_left);
-	}
-
-	free(hex);
-	LOG_FUNC_RETURN(ctx, offs);
-#else
 	LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
-#endif
 }
 
 
@@ -248,7 +163,7 @@ sm_gp_get_mac(unsigned char *key, DES_cblock *icv,
 
 	block = malloc(in_len + 8);
 	if (!block)
-		return SC_ERROR_MEMORY_FAILURE;
+		return SC_ERROR_OUT_OF_MEMORY;
 
 	memcpy(block, in, in_len);
 	memcpy(block + in_len, "\x80\0\0\0\0\0\0\0", 8);
@@ -343,7 +258,7 @@ sm_gp_external_authentication(struct sc_context *ctx, struct sm_info *sm_info,
 	unsigned char host_cryptogram[8], raw_apdu[SC_MAX_APDU_BUFFER_SIZE];
 	struct sm_gp_session *gp_session = &sm_info->session.gp;
 	DES_cblock mac;
-	int rv, idx = 0, offs = 0;
+	int rv, offs = 0;
 
 	LOG_FUNC_CALLED(ctx);
 	if (!sm_info || !init_data || !rdata || !rdata->alloc)
@@ -406,7 +321,9 @@ sm_gp_encrypt_command_data(struct sc_context *ctx, unsigned char *session_key,
 	if (!out || !out_len)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "SM GP encrypt command data error");
 
-	sc_log(ctx, "SM GP encrypt command data(len:%i,%p)", in_len, in);
+	sc_log(ctx,
+	       "SM GP encrypt command data(len:%"SC_FORMAT_LEN_SIZE_T"u,%p)",
+	       in_len, in);
 	if (in==NULL || in_len==0)   {
 		*out = NULL;
 		*out_len = 0;
@@ -448,9 +365,10 @@ sm_gp_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info,
 	LOG_FUNC_CALLED(ctx);
 
 	apdu_data = (unsigned char *)apdu->data;
-	sc_log(ctx, "SM GP securize APDU(cse:%X,cla:%X,ins:%X,data(len:%i,%p),lc:%i,GP level:%X,GP index:%X",
-				apdu->cse, apdu->cla, apdu->ins, apdu->datalen, apdu->data,
-				apdu->lc, gp_level, gp_index);
+	sc_log(ctx,
+	       "SM GP securize APDU(cse:%X,cla:%X,ins:%X,data(len:%"SC_FORMAT_LEN_SIZE_T"u,%p),lc:%"SC_FORMAT_LEN_SIZE_T"u,GP level:%X,GP index:%X",
+	       apdu->cse, apdu->cla, apdu->ins, apdu->datalen, apdu->data,
+	       apdu->lc, gp_level, gp_index);
 
 	if (gp_level == 0 || (apdu->cla & 0x04))
 		return 0;
@@ -469,7 +387,9 @@ sm_gp_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info,
 		if (encrypted_len + 8 > SC_MAX_APDU_BUFFER_SIZE)
 			LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "SM GP securize APDU: not enough place for encrypted data");
 
-		sc_log(ctx, "SM GP securize APDU: encrypted length %i", encrypted_len);
+		sc_log(ctx,
+		       "SM GP securize APDU: encrypted length %"SC_FORMAT_LEN_SIZE_T"u",
+		       encrypted_len);
 	}
 	else   {
 		LOG_TEST_RET(ctx, SC_ERROR_SM_INVALID_LEVEL, "SM GP securize APDU: invalid SM level");

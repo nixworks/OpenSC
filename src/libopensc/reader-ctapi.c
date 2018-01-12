@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #ifdef ENABLE_CTAPI
 #include <assert.h>
@@ -96,11 +98,11 @@ static int ctapi_reset(sc_reader_t *reader)
 
 	rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, 5, cmd, &lr, rbuf);
 	if (rv || (lr < 2)) {
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error getting status of terminal: %d, using defaults\n", rv);
+		sc_log(reader->ctx, "Error getting status of terminal: %d, using defaults", rv);
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	if (rbuf[lr-2] != 0x90) {
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "SW1/SW2: 0x%x/0x%x\n", rbuf[lr-2], rbuf[lr-1]);
+		sc_log(reader->ctx, "SW1/SW2: 0x%x/0x%x", rbuf[lr-2], rbuf[lr-1]);
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	return 0;
@@ -113,6 +115,9 @@ static int refresh_attributes(sc_reader_t *reader)
 	char rv;
 	u8 cmd[5], rbuf[256], sad, dad;
 	unsigned short lr;
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
 
 	cmd[0] = CTBCS_CLA;
 	cmd[1] = CTBCS_INS_STATUS;
@@ -127,7 +132,7 @@ static int refresh_attributes(sc_reader_t *reader)
 
 	rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, 5, cmd, &lr, rbuf);
 	if (rv || (lr < 3) || (rbuf[lr-2] != 0x90)) {
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error getting status of terminal: %d/%d/0x%x\n", rv, lr, rbuf[lr-2]);
+		sc_log(reader->ctx, "Error getting status of terminal: %d/%d/0x%x", rv, lr, rbuf[lr-2]);
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	if (lr < 4) {
@@ -136,11 +141,11 @@ static int refresh_attributes(sc_reader_t *reader)
 	} else {
 		if (rbuf[0] != CTBCS_P2_STATUS_ICC) {
 			/* Should we be more tolerant here? I do not think so... */
-			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Invalid data object returnd on CTBCS_P2_STATUS_ICC: 0x%x\n", rbuf[0]);
+			sc_log(reader->ctx, "Invalid data object returnd on CTBCS_P2_STATUS_ICC: 0x%x", rbuf[0]);
 		return SC_ERROR_TRANSMIT_FAILED;
 		}
 		/* Fixme - should not be reached */
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Returned status for  %d slots\n", rbuf[1]);
+		sc_log(reader->ctx, "Returned status for  %d slots", rbuf[1]);
 		reader->flags = SC_READER_CARD_PRESENT;
 	}
 
@@ -156,7 +161,10 @@ static int ctapi_internal_transmit(sc_reader_t *reader,
 	u8 dad, sad;
 	unsigned short lr;
 	char rv;
-	
+
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 	if (control)
 		dad = 1;
 	else
@@ -164,25 +172,25 @@ static int ctapi_internal_transmit(sc_reader_t *reader,
 
 	sad = 2;
 	lr = *recvsize;
-	
+
 	rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, (unsigned short)sendsize, (u8 *) sendbuf, &lr, recvbuf);
 	if (rv != 0) {
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error transmitting APDU: %d\n", rv);
+		sc_log(reader->ctx, "Error transmitting APDU: %d", rv);
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	*recvsize = lr;
-	
+
 	return 0;
 }
 
 static int ctapi_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 {
-	size_t       ssize, rsize, rbuflen = 0;
-	u8           *sbuf = NULL, *rbuf = NULL;
-	int          r;
+	size_t ssize, rsize, rbuflen = 0;
+	u8 *sbuf = NULL, *rbuf = NULL;
+	int r;
 
 	rsize = rbuflen = apdu->resplen + 2;
-	rbuf     = malloc(rbuflen);
+	rbuf = malloc(rbuflen);
 	if (rbuf == NULL) {
 		r = SC_ERROR_OUT_OF_MEMORY;
 		goto out;
@@ -196,7 +204,7 @@ static int ctapi_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
 					rbuf, &rsize, apdu->control);
 	if (r < 0) {
 		/* unable to transmit ... most likely a reader problem */
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "unable to transmit");
+		sc_log(reader->ctx, "unable to transmit");
 		goto out;
 	}
 	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, rbuf, rsize, 0);
@@ -211,14 +219,14 @@ out:
 		sc_mem_clear(rbuf, rbuflen);
 		free(rbuf);
 	}
-	
+
 	return r;
 }
 
 static int ctapi_detect_card_presence(sc_reader_t *reader)
 {
 	int r;
-	
+
 	r = refresh_attributes(reader);
 	if (r)
 		return r;
@@ -233,6 +241,9 @@ static int ctapi_connect(sc_reader_t *reader)
 	unsigned short lr;
 	int r;
 
+	if (reader->ctx->flags & SC_CTX_FLAG_TERMINATE)
+		return SC_ERROR_NOT_ALLOWED;
+
 	cmd[0] = CTBCS_CLA;
 	cmd[1] = CTBCS_INS_REQUEST;
 	cmd[2] = CTBCS_P1_INTERFACE1;
@@ -244,7 +255,7 @@ static int ctapi_connect(sc_reader_t *reader)
 
 	rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, 5, cmd, &lr, rbuf);
 	if (rv || rbuf[lr-2] != 0x90) {
-		sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error activating card: %d\n", rv);
+		sc_log(reader->ctx, "Error activating card: %d", rv);
 		return SC_ERROR_TRANSMIT_FAILED;
 	}
 	if (lr < 2)
@@ -256,26 +267,6 @@ static int ctapi_connect(sc_reader_t *reader)
 	memcpy(reader->atr.value, rbuf, lr);
 	r = _sc_parse_atr(reader);
 
-#if 0	
-	if (reader->atr_info.Fi > 0) {
-		/* Perform PPS negotiation */
-		cmd[1] = CTBCS_INS_RESET;
-		cmd[4] = 0x03;
-		cmd[5] = 0xFF;
-		cmd[6] = 0x10;
-		cmd[7] = (reader->atr_info.FI << 4) | reader->atr_info.DI;
-		cmd[8] = 0x00;
-		dad = 1;
-		sad = 2;
-		lr = 256;
-
-		rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, 9, cmd, &lr, rbuf);
-		if (rv) {
-			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error negotiating PPS: %d\n", rv);
-			return SC_ERROR_TRANSMIT_FAILED;
-		}
-	}
-#endif	
 	return 0;
 }
 
@@ -298,7 +289,9 @@ static int ctapi_release(sc_reader_t *reader)
 {
 	struct ctapi_private_data *priv = GET_PRIV_DATA(reader);
 
-	priv->funcs.CT_close(priv->ctn);
+
+	if (!(reader->ctx->flags & SC_CTX_FLAG_TERMINATE))
+		priv->funcs.CT_close(priv->ctn);
 
 	free(priv);
 	return 0;
@@ -310,49 +303,52 @@ static struct sc_reader_driver ctapi_drv = {
 	"CT-API module",
 	"ctapi",
 	&ctapi_ops,
-	0, 0, NULL
+	NULL
 };
 
 static struct ctapi_module * add_module(struct ctapi_global_private_data *gpriv,
-		      const char *name, void *dlhandle)
+		const char *name, void *dlhandle)
 {
 	int i;
+	struct ctapi_module *p;
 
 	i = gpriv->module_count;
-	gpriv->modules = (struct ctapi_module *) realloc(gpriv->modules, sizeof(struct ctapi_module) * (i+1));
+	p = (struct ctapi_module *) realloc(gpriv->modules, sizeof(struct ctapi_module) * (i+1));
+	if (!p) {
+		return NULL;
+	}
+	gpriv->modules = p;
 	gpriv->modules[i].name = strdup(name);
 	gpriv->modules[i].dlhandle = dlhandle;
 	gpriv->modules[i].ctn_count = 0;
 	gpriv->module_count++;
-	
+
 	return &gpriv->modules[i];
 }
 
 static int ctapi_load_module(sc_context_t *ctx,
-			     struct ctapi_global_private_data *gpriv,
-			     scconf_block *conf)
+		struct ctapi_global_private_data *gpriv, scconf_block *conf)
 {
 	const char *val;
 	struct ctapi_functions funcs;
 	struct ctapi_module *mod;
 	const scconf_list *list;
+	scconf_block *conf_block = NULL;
 	void *dlh;
 	int r, i, NumUnits;
 	u8 cmd[5], rbuf[256], sad, dad;
 	unsigned short lr;
 
-	
-	
 	list = scconf_find_list(conf, "ports");
 	if (list == NULL) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "No ports configured.\n");
+		sc_log(ctx, "No ports configured.");
 		return -1;
 	}
 
 	val = conf->name->data;
 	dlh = sc_dlopen(val);
 	if (!dlh) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Unable to open shared library '%s': %s\n", val, sc_dlerror());
+		sc_log(ctx, "Unable to open shared library '%s': %s", val, sc_dlerror());
 		return -1;
 	}
 
@@ -367,27 +363,32 @@ static int ctapi_load_module(sc_context_t *ctx,
 		goto symerr;
 
 	mod = add_module(gpriv, val, dlh);
+	if (!mod)
+		goto symerr;
 	for (; list != NULL; list = list->next) {
 		int port;
 		char namebuf[128];
 		char rv;
 		sc_reader_t *reader;
 		struct ctapi_private_data *priv;
-		
+
 		if (sscanf(list->data, "%d", &port) != 1) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Port '%s' is not a number.\n", list->data);
+			sc_log(ctx, "Port '%s' is not a number.", list->data);
 			continue;
 		}
 		rv = funcs.CT_init((unsigned short)mod->ctn_count, (unsigned short)port);
 		if (rv) {
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "CT_init() failed with %d\n", rv);
+			sc_log(ctx, "CT_init() failed with %d", rv);
 			continue;
 		}
-		
+
 		reader = calloc(1, sizeof(sc_reader_t));
 		priv = calloc(1, sizeof(struct ctapi_private_data));
-		if (!priv)
+		if (!priv || !reader) {
+			free(reader);
+			free(priv);
 			return SC_ERROR_OUT_OF_MEMORY;
+		}
 		reader->drv_data = priv;
 		reader->ops = &ctapi_ops;
 		reader->driver = &ctapi_drv;
@@ -395,6 +396,18 @@ static int ctapi_load_module(sc_context_t *ctx,
 		reader->name = strdup(namebuf);
 		priv->funcs = funcs;
 		priv->ctn = mod->ctn_count;
+
+		reader->max_send_size = SC_READER_SHORT_APDU_MAX_SEND_SIZE;
+		reader->max_recv_size = SC_READER_SHORT_APDU_MAX_RECV_SIZE;
+
+		conf_block = sc_get_conf_block(ctx, "reader_driver", "ctapi", 1);
+		if (conf_block) {
+			reader->max_send_size = scconf_get_int(conf_block, "max_send_size", reader->max_send_size);
+			reader->max_recv_size = scconf_get_int(conf_block, "max_recv_size", reader->max_recv_size);
+			if (scconf_get_bool(conf_block, "enable_escape", 0))
+				reader->flags |= SC_READER_ENABLE_ESCAPE;
+		}
+
 		r = _sc_add_reader(ctx, reader);
 		if (r) {
 			funcs.CT_close((unsigned short)mod->ctn_count);
@@ -403,9 +416,9 @@ static int ctapi_load_module(sc_context_t *ctx,
 			free(reader);
 			break;
 		}
-		
-		/* Detect functional units of the reader according to CT-BCS spec version 1.0 
-		(14.04.2004, http://www.teletrust.de/down/mct1-0_t4.zip) */	
+
+		/* Detect functional units of the reader according to CT-BCS spec version 1.0
+		(14.04.2004, http://www.teletrust.de/down/mct1-0_t4.zip) */
 		cmd[0] = CTBCS_CLA;
 		cmd[1] = CTBCS_INS_STATUS;
 		cmd[2] = CTBCS_P1_CT_KERNEL;
@@ -414,19 +427,19 @@ static int ctapi_load_module(sc_context_t *ctx,
 		dad = 1;
 		sad = 2;
 		lr = 256;
-		
+
 		rv = priv->funcs.CT_data(priv->ctn, &dad, &sad, 5, cmd, &lr, rbuf);
 		if (rv || (lr < 4) || (rbuf[lr-2] != 0x90)) {
-			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Error getting status of terminal: %d, using defaults\n", rv);
+			sc_log(reader->ctx, "Error getting status of terminal: %d, using defaults", rv);
 		}
 		if (rbuf[0] != CTBCS_P2_STATUS_TFU) {
 			/* Number of slots might also detected by using CTBCS_P2_STATUS_ICC.
 			   If you think that's important please do it... ;) */
-			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Invalid data object returnd on CTBCS_P2_STATUS_TFU: 0x%x\n", rbuf[0]);
+			sc_log(reader->ctx, "Invalid data object returnd on CTBCS_P2_STATUS_TFU: 0x%x", rbuf[0]);
 		}
 		NumUnits = rbuf[1];
 		if (NumUnits + 4 > lr) {
-			sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Invalid data returnd: %d functional units, size %d\n", NumUnits, rv);
+			sc_log(reader->ctx, "Invalid data returnd: %d functional units, size %d", NumUnits, rv);
 		}
 		priv->ctapi_functional_units = 0;
 		for(i = 0; i < NumUnits; i++) {
@@ -448,22 +461,22 @@ static int ctapi_load_module(sc_context_t *ctx,
 				/* Maybe a weak point here if multiple interfaces are present and not returned
 				   in the "canonical" order. This is not forbidden by the specs, but why should
 				   anyone want to do that? */
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Found slot id 0x%x\n", rbuf[i+2]);
+					sc_log(reader->ctx, "Found slot id 0x%x", rbuf[i+2]);
 					break;
 
 				case CTBCS_P1_DISPLAY:
 					priv->ctapi_functional_units |= CTAPI_FU_DISPLAY;
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Display detected\n");
+					sc_log(reader->ctx, "Display detected");
 					break;
 
 				case CTBCS_P1_KEYPAD:
 					priv->ctapi_functional_units |= CTAPI_FU_KEYBOARD;
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Keypad detected\n");
+					sc_log(reader->ctx, "Keypad detected");
 					break;
 
 				case CTBCS_P1_PRINTER:
 					priv->ctapi_functional_units |= CTAPI_FU_PRINTER;
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Printer detected\n");
+					sc_log(reader->ctx, "Printer detected");
 					break;
 
 				case CTBCS_P1_FINGERPRINT:
@@ -472,11 +485,11 @@ static int ctapi_load_module(sc_context_t *ctx,
 				case CTBCS_P1_FACE_RECOGNITION:
 				case CTBCS_P1_IRISSCAN:
 					priv->ctapi_functional_units |= CTAPI_FU_BIOMETRIC;
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Biometric sensor detected\n");
+					sc_log(reader->ctx, "Biometric sensor detected");
 					break;
 
 				default:
-					sc_debug(reader->ctx, SC_LOG_DEBUG_NORMAL, "Unknown functional unit 0x%x\n", rbuf[i+2]);
+					sc_log(reader->ctx, "Unknown functional unit 0x%x", rbuf[i+2]);
 			}
 		}
 		/* CT-BCS does not define Keyboard/Display for each slot, so I assume
@@ -487,14 +500,14 @@ static int ctapi_load_module(sc_context_t *ctx,
 			if (priv->ctapi_functional_units & CTAPI_FU_DISPLAY)
 				reader->capabilities |= SC_READER_CAP_DISPLAY;
 		}
-		
+
 		ctapi_reset(reader);
 		refresh_attributes(reader);
 		mod->ctn_count++;
 	}
 	return 0;
 symerr:
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "Unable to resolve CT-API symbols.\n");
+	sc_log(ctx, "Unable to resolve CT-API symbols.");
 	sc_dlclose(dlh);
 	return -1;
 }
@@ -509,23 +522,15 @@ static int ctapi_init(sc_context_t *ctx)
 	if (gpriv == NULL)
 		return SC_ERROR_OUT_OF_MEMORY;
 	ctx->reader_drv_data = gpriv;
-	
-	for (i = 0; ctx->conf_blocks[i] != NULL; i++) {
-		blocks = scconf_find_blocks(ctx->conf, ctx->conf_blocks[i],
-					    "reader_driver", "ctapi");
-		if (blocks && blocks[0])
-			conf_block = blocks[0];
+
+	conf_block = sc_get_conf_block(ctx, "reader_driver", "ctapi", 1);
+	if (conf_block)   {
+		blocks = scconf_find_blocks(ctx->conf, conf_block, "module", NULL);
+		for (i = 0; blocks != NULL && blocks[i] != NULL; i++)
+			ctapi_load_module(ctx, gpriv, blocks[i]);
 		free(blocks);
-		if (conf_block != NULL)
-			break;
 	}
-	if (conf_block == NULL)
-		return 0;
-	blocks = scconf_find_blocks(ctx->conf, conf_block, "module", NULL);
-	for (i = 0; blocks != NULL && blocks[i] != NULL; i++)
-		ctapi_load_module(ctx, gpriv, blocks[i]);
-	free(blocks);
-	
+
 	return 0;
 }
 
@@ -535,10 +540,10 @@ static int ctapi_finish(sc_context_t *ctx)
 
 	if (priv) {
 		int i;
-		
+
 		for (i = 0; i < priv->module_count; i++) {
 			struct ctapi_module *mod = &priv->modules[i];
-			
+
 			free(mod->name);
 			sc_dlclose(mod->dlhandle);
 		}
@@ -546,7 +551,7 @@ static int ctapi_finish(sc_context_t *ctx)
 			free(priv->modules);
 		free(priv);
 	}
-	
+
 	return 0;
 }
 
@@ -565,7 +570,7 @@ struct sc_reader_driver * sc_get_ctapi_driver(void)
 	ctapi_ops.perform_verify = ctbcs_pin_cmd;
 	ctapi_ops.perform_pace = NULL;
 	ctapi_ops.use_reader = NULL;
-	
+
 	return &ctapi_drv;
 }
 #endif

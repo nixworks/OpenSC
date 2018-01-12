@@ -2,13 +2,28 @@
  * OpenSSL helper functions, e.g. for implementing MD5 support
  * et al
  *
- * Copyright (C) 2002 Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002 Olaf Kirch <okir@suse.de>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "config.h"
 
 #ifdef ENABLE_OPENSSL		/* empty file without openssl */
 #include <string.h>
+#include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
@@ -48,7 +63,8 @@ static sc_pkcs11_mechanism_type_t openssl_sha1_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 
 #if OPENSSL_VERSION_NUMBER >= 0x00908000L
@@ -65,7 +81,8 @@ static sc_pkcs11_mechanism_type_t openssl_sha256_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 
 static sc_pkcs11_mechanism_type_t openssl_sha384_mech = {
@@ -81,7 +98,8 @@ static sc_pkcs11_mechanism_type_t openssl_sha384_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 
 static sc_pkcs11_mechanism_type_t openssl_sha512_mech = {
@@ -97,7 +115,8 @@ static sc_pkcs11_mechanism_type_t openssl_sha512_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 #endif
 
@@ -115,7 +134,8 @@ static sc_pkcs11_mechanism_type_t openssl_gostr3411_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 #endif
 
@@ -132,7 +152,8 @@ static sc_pkcs11_mechanism_type_t openssl_md5_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 
 static sc_pkcs11_mechanism_type_t openssl_ripemd160_mech = {
@@ -148,25 +169,41 @@ static sc_pkcs11_mechanism_type_t openssl_ripemd160_mech = {
 	NULL, NULL, NULL,	/* verif_* */
 	NULL, NULL,		/* decrypt_* */
 	NULL,			/* derive */
-	NULL			/* mech_data */
+	NULL,			/* mech_data */
+	NULL,			/* free_mech_data */
 };
 
+static void * dup_mem(void *in, size_t in_len)
+{
+	void *out = malloc(in_len);
+	if (out)
+		memcpy(out, in, in_len);
+	return out;
+}
+
 void
-sc_pkcs11_register_openssl_mechanisms(struct sc_pkcs11_card *card)
+sc_pkcs11_register_openssl_mechanisms(struct sc_pkcs11_card *p11card)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_ENGINE)
-	void (*locking_cb)(int, int, const char *, int);
 	ENGINE *e;
+/* crypto locking removed in 1.1 */
+#if OPENSSL_VERSION_NUMBER  < 0x10100000L
+	void (*locking_cb)(int, int, const char *, int);
 
 	locking_cb = CRYPTO_get_locking_callback();
 	if (locking_cb)
 		CRYPTO_set_locking_callback(NULL);
+#endif
 
 	e = ENGINE_by_id("gost");
 	if (!e)
 	{
-#if !defined(OPENSSL_NO_STATIC_ENGINE) && !defined(OPENSSL_NO_GOST)
+#if !defined(OPENSSL_NO_STATIC_ENGINE) && !defined(OPENSSL_NO_GOST) && !defined(LIBRESSL_VERSION_NUMBER)
+
+/* ENGINE_load_gost removed in 1.1 */
+#if OPENSSL_VERSION_NUMBER  < 0x10100000L
 		ENGINE_load_gost();
+#endif
 		e = ENGINE_by_id("gost");
 #else
 		/* try to load dynamic gost engine */
@@ -187,27 +224,29 @@ sc_pkcs11_register_openssl_mechanisms(struct sc_pkcs11_card *card)
 		ENGINE_free(e);
 	}
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 	if (locking_cb)
 		CRYPTO_set_locking_callback(locking_cb);
+#endif
 #endif /* OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_ENGINE) */
 
 	openssl_sha1_mech.mech_data = EVP_sha1();
-	sc_pkcs11_register_mechanism(card, &openssl_sha1_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_sha1_mech, sizeof openssl_sha1_mech));
 #if OPENSSL_VERSION_NUMBER >= 0x00908000L
 	openssl_sha256_mech.mech_data = EVP_sha256();
-	sc_pkcs11_register_mechanism(card, &openssl_sha256_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_sha256_mech, sizeof openssl_sha256_mech));
 	openssl_sha384_mech.mech_data = EVP_sha384();
-	sc_pkcs11_register_mechanism(card, &openssl_sha384_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_sha384_mech, sizeof openssl_sha384_mech));
 	openssl_sha512_mech.mech_data = EVP_sha512();
-	sc_pkcs11_register_mechanism(card, &openssl_sha512_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_sha512_mech, sizeof openssl_sha512_mech));
 #endif
 	openssl_md5_mech.mech_data = EVP_md5();
-	sc_pkcs11_register_mechanism(card, &openssl_md5_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_md5_mech, sizeof openssl_md5_mech));
 	openssl_ripemd160_mech.mech_data = EVP_ripemd160();
-	sc_pkcs11_register_mechanism(card, &openssl_ripemd160_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_ripemd160_mech, sizeof openssl_ripemd160_mech));
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	openssl_gostr3411_mech.mech_data = EVP_get_digestbynid(NID_id_GostR3411_94);
-	sc_pkcs11_register_mechanism(card, &openssl_gostr3411_mech);
+	sc_pkcs11_register_mechanism(p11card, dup_mem(&openssl_gostr3411_mech, sizeof openssl_gostr3411_mech));
 #endif
 }
 
@@ -227,7 +266,7 @@ static CK_RV sc_pkcs11_openssl_md_init(sc_pkcs11_operation_t *op)
 	if (!op || !(mt = op->type) || !(md = (EVP_MD *) mt->mech_data))
 		return CKR_ARGUMENTS_BAD;
 
-	if (!(md_ctx = calloc(1, sizeof(*md_ctx))))
+	if (!(md_ctx = EVP_MD_CTX_create()))
 		return CKR_HOST_MEMORY;
 	EVP_DigestInit(md_ctx, md);
 	op->priv_data = md_ctx;
@@ -247,8 +286,8 @@ static CK_RV sc_pkcs11_openssl_md_final(sc_pkcs11_operation_t *op,
 	EVP_MD_CTX *md_ctx = DIGEST_CTX(op);
 
 	if (*pulDigestLen < (unsigned) EVP_MD_CTX_size(md_ctx)) {
-		sc_log(context, "Provided buffer too small: %ul < %d",
-			*pulDigestLen, EVP_MD_CTX_size(md_ctx));
+		sc_log(context, "Provided buffer too small: %lu < %d",
+		       *pulDigestLen, EVP_MD_CTX_size(md_ctx));
 		*pulDigestLen = EVP_MD_CTX_size(md_ctx);
 		return CKR_BUFFER_TOO_SMALL;
 	}
@@ -263,7 +302,7 @@ static void sc_pkcs11_openssl_md_release(sc_pkcs11_operation_t *op)
 	EVP_MD_CTX	*md_ctx = DIGEST_CTX(op);
 
 	if (md_ctx)
-		free(md_ctx);
+		EVP_MD_CTX_destroy(md_ctx);
 	op->priv_data = NULL;
 }
 
@@ -366,7 +405,8 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
 {
 	int res;
 	CK_RV rv = CKR_GENERAL_ERROR;
-	EVP_PKEY *pkey;
+	EVP_PKEY *pkey = NULL;
+	const unsigned char *pubkey_tmp = NULL;
 
 	if (mech == CKM_GOSTR3410)
 	{
@@ -380,7 +420,15 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
 #endif
 	}
 
-	pkey = d2i_PublicKey(EVP_PKEY_RSA, NULL, &pubkey, pubkey_len);
+	/*
+	 * PKCS#11 does not define CKA_VALUE for public keys, and different cards
+	 * return either the raw or spki versions as defined in PKCS#15
+	 * And we need to support more then just RSA.
+	 * We can use d2i_PUBKEY which works for SPKI and any key type. 
+	 */
+	pubkey_tmp = pubkey; /* pass in so pubkey pointer is not modified */
+
+	pkey = d2i_PUBKEY(NULL, &pubkey_tmp, pubkey_len);
 	if (pkey == NULL)
 		return CKR_GENERAL_ERROR;
 
@@ -410,6 +458,7 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
 		 case CKM_RSA_X_509:
 		 	pad = RSA_NO_PADDING;
 		 	break;
+		/* TODO support more then RSA */
 		 default:
 			EVP_PKEY_free(pkey);
 		 	return CKR_ARGUMENTS_BAD;
@@ -420,7 +469,7 @@ CK_RV sc_pkcs11_verify_data(const unsigned char *pubkey, int pubkey_len,
 		if (rsa == NULL)
 			return CKR_DEVICE_MEMORY;
 
-		rsa_out = malloc(RSA_size(rsa));
+		rsa_out = calloc(1, RSA_size(rsa));
 		if (rsa_out == NULL) {
 			RSA_free(rsa);
 			return CKR_DEVICE_MEMORY;

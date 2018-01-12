@@ -187,9 +187,11 @@ static int openpgp_generate_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card
 
 	/* The OpenPGP supports only 32-bit exponent. */
 	key_info.exponent_len = 32;
-	key_info.exponent = calloc(4, 1);
-	if (key_info.exponent == NULL)
+	key_info.exponent = calloc(key_info.exponent_len>>3, 1); /* 1/8 */
+	if (key_info.exponent == NULL) {
+		free(key_info.modulus);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_ENOUGH_MEMORY);
+	}
 
 	r = sc_card_ctl(card, SC_CARDCTL_OPENPGP_GENERATE_KEY, &key_info);
 	if (r < 0)
@@ -204,10 +206,10 @@ static int openpgp_generate_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card
 
 	sc_log(ctx, "Set output exponent info");
 	pubkey->u.rsa.exponent.len = key_info.exponent_len;
-	pubkey->u.rsa.exponent.data = calloc(key_info.exponent_len, 1);
+	pubkey->u.rsa.exponent.data = calloc(key_info.exponent_len>>3, 1); /* 1/8 */
 	if (pubkey->u.rsa.exponent.data == NULL)
 		goto out;
-	memcpy(pubkey->u.rsa.exponent.data, key_info.exponent, key_info.exponent_len);
+	memcpy(pubkey->u.rsa.exponent.data, key_info.exponent, key_info.exponent_len>>3); /* 1/8 */
 
 out:
 	if (key_info.modulus)
@@ -236,13 +238,16 @@ static int openpgp_emu_update_tokeninfo(sc_profile_t *profile, sc_pkcs15_card_t 
 }
 
 static int openpgp_store_data(struct sc_pkcs15_card *p15card, struct sc_profile *profile,
-                              struct sc_pkcs15_object *obj,	struct sc_pkcs15_der *content,
+                              struct sc_pkcs15_object *obj, struct sc_pkcs15_der *content,
                               struct sc_path *path)
 {
 	sc_card_t *card = p15card->card;
+	sc_context_t *ctx = card->ctx;
 	sc_file_t *file;
 	sc_pkcs15_cert_info_t *cinfo;
 	sc_pkcs15_id_t *cid;
+	sc_pkcs15_data_info_t *dinfo;
+	u8 buf[254];
 	int r;
 
 	LOG_FUNC_CALLED(card->ctx);
@@ -276,10 +281,44 @@ static int openpgp_store_data(struct sc_pkcs15_card *p15card, struct sc_profile 
 		r = sc_select_file(card, path, &file);
 		LOG_TEST_RET(card->ctx, r, "Cannot select cert file");
 		r = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_UPDATE);
+		sc_log(card->ctx,
+		       "Data to write is %"SC_FORMAT_LEN_SIZE_T"u long",
+		       content->len);
 		if (r >= 0 && content->len)
+			r = sc_put_data(p15card->card, 0x7F21, (const unsigned char *) content->value, content->len);
+		break;
+
+	case SC_PKCS15_TYPE_DATA_OBJECT:
+		dinfo = (sc_pkcs15_data_info_t *) obj->data;
+		/* dinfo->app_label contains filename */
+		sc_log(ctx, "===== App label %s", dinfo->app_label);
+		/* Currently, we only support DO 0101. The reason is that when initializing this
+		 * pkcs15 emulation, PIN authentication is not applied and we can expose only this DO,
+		 * which is "read always".
+		 * If we support other DOs, they will not be exposed, and not helpful to user.
+		 * I haven't found a way to refresh the list of exposed DOs after verifying PIN yet.
+		 * http://sourceforge.net/mailarchive/message.php?msg_id=30646373
+		 **/
+		sc_log(ctx, "About to write to DO 0101");
+		sc_format_path("0101", path);
+		r = sc_select_file(card, path, &file);
+		LOG_TEST_RET(card->ctx, r, "Cannot select private DO");
+		r = sc_read_binary(card, 0, buf, sizeof(buf), 0);
+		if (r < 0) {
+			sc_log(ctx, "Cannot read DO 0101");
+			break;
+		}
+		if (r > 0) {
+			sc_log(ctx, "DO 0101 is full.");
+			r = SC_ERROR_NOT_ENOUGH_MEMORY;
+			break;
+		}
+		r = sc_pkcs15init_authenticate(profile, p15card, file, SC_AC_OP_UPDATE);
+		if (r >= 0 && content->len) {
 			r = sc_update_binary(p15card->card, 0,
 			                     (const unsigned char *) content->value,
 			                     content->len, 0);
+		}
 		break;
 
 	default:

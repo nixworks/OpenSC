@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -29,7 +31,7 @@
 #include "cardctl.h"
 #include "common/compat_strlcpy.h"
 
-int sc_pkcs15emu_westcos_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_westcos_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 {
@@ -39,14 +41,10 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 	sc_card_t *card = p15card->card;
 	sc_serial_number_t serial;
 	sc_path_t path;
-	sc_file_t *file = NULL;
 	sc_format_path("3F00", &path);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	if (r)
 		goto out;
-	if (file)
-		sc_file_free(file);
-	file = NULL;
 	if (p15card->tokeninfo->label != NULL)
 		free(p15card->tokeninfo->label);
 	p15card->tokeninfo->label = strdup("westcos");
@@ -56,6 +54,8 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 
 	/* get serial number */
 	r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+	if (r)
+		goto out;
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r)
 		goto out;
@@ -63,14 +63,14 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 		free(p15card->tokeninfo->serial_number);
 	p15card->tokeninfo->serial_number = strdup(buf);
 	sc_format_path("AAAA", &path);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	if (r) 
 	{
 		goto out;
 	}
 	else
 	{
-		for (i = 0; i < 1; i++) {
+		for (i = 0; i <= 1; i++) {
 			unsigned int flags;
 			struct sc_pkcs15_auth_info pin_info;
 			struct sc_pkcs15_object pin_obj;
@@ -94,13 +94,17 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 			pin_info.attrs.pin.pad_char = 0xff;
 			pin_info.path = path;
 			pin_info.tries_left = -1;
+			pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 			if (i == 1)
 				strlcpy(pin_obj.label, "Unblock",
 					sizeof(pin_obj.label));
 
-			else
+			else {
 				strlcpy(pin_obj.label, "User",
 					sizeof(pin_obj.label));
+				pin_obj.auth_id.len = 1;
+				pin_obj.auth_id.value[0] = 2;
+			}
 			pin_obj.flags =
 				SC_PKCS15_CO_FLAG_MODIFIABLE |
 				SC_PKCS15_CO_FLAG_PRIVATE;
@@ -111,11 +115,8 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 		}
 	}
 	
-	if (file)
-		sc_file_free(file);
-	file = NULL;
 	sc_format_path("0002", &path);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	if (r) 
 	{
 		goto out;
@@ -195,11 +196,8 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 				goto out;
 		}
 	}
-	if (file)
-		sc_file_free(file);
-	file = NULL;
 	sc_format_path("0001", &path);
-	r = sc_select_file(card, &path, &file);
+	r = sc_select_file(card, &path, NULL);
 	if (r) 
 	{
 		goto out;
@@ -231,8 +229,6 @@ static int sc_pkcs15emu_westcos_init(sc_pkcs15_card_t * p15card)
 	}
 	r = 0;
 out:
-	if (file)
-		sc_file_free(file);
 	return r;
 }
 
@@ -249,6 +245,7 @@ static int westcos_detect_card(sc_pkcs15_card_t * p15card)
 }
 
 int sc_pkcs15emu_westcos_init_ex(sc_pkcs15_card_t * p15card,
+				 struct sc_aid *aid,
 				 sc_pkcs15emu_opt_t * opts)
 {
 	int r;

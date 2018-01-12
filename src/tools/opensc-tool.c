@@ -50,21 +50,25 @@ static int	verbose = 0;
 
 enum {
 	OPT_SERIAL = 0x100,
-	OPT_LIST_ALG
+	OPT_LIST_ALG,
+	OPT_VERSION,
+	OPT_RESET
 };
 
 static const struct option options[] = {
+	{ "version",		0, NULL,	OPT_VERSION },
 	{ "info",		0, NULL,		'i' },
 	{ "atr",		0, NULL,		'a' },
 	{ "serial",		0, NULL,	OPT_SERIAL  },
 	{ "name",		0, NULL,		'n' },
 	{ "get-conf-entry",	1, NULL,		'G' },
 	{ "set-conf-entry",	1, NULL,		'S' },
-	{ "list-readers",	0, NULL, 		'l' },
+	{ "list-readers",	0, NULL,		'l' },
 	{ "list-drivers",	0, NULL,		'D' },
 	{ "list-files",		0, NULL,		'f' },
 	{ "send-apdu",		1, NULL,		's' },
 	{ "reader",		1, NULL,		'r' },
+	{ "reset",		2, NULL,	OPT_RESET   },
 	{ "card-driver",	1, NULL,		'c' },
 	{ "list-algorithms",    0, NULL,	OPT_LIST_ALG },
 	{ "wait",		0, NULL,		'w' },
@@ -73,6 +77,7 @@ static const struct option options[] = {
 };
 
 static const char *option_help[] = {
+	"Prints OpenSC package revision",
 	"Prints information about OpenSC",
 	"Prints the ATR bytes of the card",
 	"Prints the card serial number",
@@ -84,6 +89,7 @@ static const char *option_help[] = {
 	"Recursively lists files stored on card",
 	"Sends an APDU in format AA:BB:CC:DD:EE:FF...",
 	"Uses reader number <arg> [0]",
+	"Does card reset of type <cold|warm> [cold]",
 	"Forces the use of driver <arg> [auto-detect]",
 	"Lists algorithms supported by card",
 	"Wait for a card to be inserted",
@@ -149,7 +155,7 @@ static int opensc_get_conf_entry(const char *config)
 	}
 
 	section = buffer;
-	name = section == NULL ? NULL : strchr(section+1, ':');
+	name = strchr(section+1, ':');
 	key = name == NULL ? NULL : strchr(name+1, ':');
 	if (key == NULL) {
 		r = EINVAL;
@@ -161,7 +167,7 @@ static int opensc_get_conf_entry(const char *config)
 	key++;
 
 	blocks = scconf_find_blocks(ctx->conf, NULL, section, name);
-	if (blocks[0])
+	if (blocks && blocks[0])
 		conf_block = blocks[0];
 	free(blocks);
 	if (conf_block != NULL) {
@@ -203,7 +209,7 @@ static int opensc_set_conf_entry(const char *config)
 	}
 
 	section = buffer;
-	name = section == NULL ? NULL : strchr(section+1, ':');
+	name = strchr(section+1, ':');
 	key = name == NULL ? NULL : strchr(name+1, ':');
 	value = key == NULL ? NULL : strchr(key+1, ':');
 	if (value == NULL) {
@@ -218,7 +224,7 @@ static int opensc_set_conf_entry(const char *config)
 	value++;
 
 	blocks = scconf_find_blocks(ctx->conf, NULL, section, name);
-	if (blocks[0])
+	if (blocks && blocks[0])
 		conf_block = blocks[0];
 	free(blocks);
 	if (conf_block != NULL) {
@@ -285,7 +291,7 @@ static int list_readers(void)
 				if ((r = sc_connect_card(reader, &card)) != SC_SUCCESS) {
 					fprintf(stderr, "     failed: %s\n", sc_strerror(r));
 				} else {
-					printf("     %s %s %s\n", tmp, card->name, state & SC_READER_CARD_INUSE ? "[IN USE]" : "");
+					printf("     %s %s %s\n", tmp, card->name ? card->name : "", state & SC_READER_CARD_INUSE ? "[IN USE]" : "");
 					sc_disconnect_card(card);
 				}
 			}
@@ -492,8 +498,8 @@ static int list_files(void)
 static int send_apdu(void)
 {
 	sc_apdu_t apdu;
-	u8 buf[SC_MAX_APDU_BUFFER_SIZE],
-	  rbuf[SC_MAX_APDU_BUFFER_SIZE];
+	u8 buf[SC_MAX_EXT_APDU_BUFFER_SIZE],
+	  rbuf[SC_MAX_EXT_APDU_BUFFER_SIZE];
 	size_t len0, r;
 	int c;
 
@@ -639,7 +645,30 @@ static int list_algorithms(void)
 	return 0;
 }
 
-int main(int argc, char * const argv[])
+static int card_reset(const char *reset_type)
+{
+	int cold_reset;
+	int r;
+
+	if (reset_type && strcmp(reset_type, "cold") &&
+	    strcmp(reset_type, "warm")) {
+		fprintf(stderr, "Invalid reset type: %s\n", reset_type);
+		return 2;
+	}
+
+	cold_reset = !reset_type || strcmp(reset_type, "cold") == 0;
+
+	r = sc_reset(card, cold_reset);
+	if (r) {
+		fprintf(stderr, "sc_reset(%s) failed: %d\n",
+			cold_reset ? "cold" : "warm", r);
+		return 1;
+	}
+
+	return 0;
+}
+
+int main(int argc, char *argv[])
 {
 	int err = 0, r, c, long_optind = 0;
 	int do_info = 0;
@@ -650,12 +679,16 @@ int main(int argc, char * const argv[])
 	int do_list_files = 0;
 	int do_send_apdu = 0;
 	int do_print_atr = 0;
+	int do_print_version = 0;
 	int do_print_serial = 0;
 	int do_print_name = 0;
 	int do_list_algorithms = 0;
+	int do_reset = 0;
 	int action_count = 0;
 	const char *opt_driver = NULL;
 	const char *opt_conf_entry = NULL;
+	const char *opt_reset_type = NULL;
+	char **p;
 	sc_context_param_t ctx_param;
 
 	setbuf(stderr, NULL);
@@ -695,8 +728,14 @@ int main(int argc, char * const argv[])
 			action_count++;
 			break;
 		case 's':
-			opt_apdus = (char **) realloc(opt_apdus,
+			p = (char **) realloc(opt_apdus,
 					(opt_apdu_count + 1) * sizeof(char *));
+			if (!p) {
+				fprintf(stderr, "Not enough memory\n");
+				err = 1;
+				goto end;
+			}
+			opt_apdus = p;
 			opt_apdus[opt_apdu_count] = optarg;
 			do_send_apdu++;
 			if (opt_apdu_count == 0)
@@ -717,6 +756,10 @@ int main(int argc, char * const argv[])
 		case 'v':
 			verbose++;
 			break;
+		case OPT_VERSION:
+			do_print_version = 1;
+			action_count++;
+			break;
 		case 'c':
 			opt_driver = optarg;
 			break;
@@ -731,10 +774,20 @@ int main(int argc, char * const argv[])
 			do_list_algorithms = 1;
 			action_count++;
 			break;
+		case OPT_RESET:
+			do_reset = 1;
+			opt_reset_type = optarg;
+			action_count++;
+			break;
 		}
 	}
 	if (action_count == 0)
 		util_print_usage_and_die(app_name, options, option_help, NULL);
+
+	if (do_print_version)   {
+		printf("%s\n", OPENSC_SCM_REVISION);
+		action_count--;
+	}
 
 	if (do_info) {
 		opensc_info();
@@ -750,6 +803,8 @@ int main(int argc, char * const argv[])
 		fprintf(stderr, "Failed to establish context: %s\n", sc_strerror(r));
 		return 1;
 	}
+
+	ctx->flags |= SC_CTX_FLAG_ENABLE_DEFAULT_DRIVER;
 
 	if (verbose > 1) {
 		ctx->debug = verbose;
@@ -829,6 +884,12 @@ int main(int argc, char * const argv[])
 
 	if (do_list_algorithms) {
 		if ((err = list_algorithms()))
+			goto end;
+		action_count--;
+	}
+
+	if (do_reset) {
+		if ((err = card_reset(opt_reset_type)))
 			goto end;
 		action_count--;
 	}

@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +34,7 @@
 #define MANU_ID		"A-Trust"
 #define CARD_LABEL	"a.sign Premium a"
 
-int sc_pkcs15emu_atrust_acos_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_atrust_acos_init_ex(sc_pkcs15_card_t *, struct sc_aid *aid, sc_pkcs15emu_opt_t *);
 
 typedef struct cdata_st {
 	const char *label;
@@ -112,9 +114,6 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 {
 	const cdata certs[] = {
 		{"C.CH.EKEY", 0, "DF71C001","1", 0},/* Decryption Certificate */
-#if 0
-		{"C.CH.DS",   0, "DF70C002","2", 0},/* Signature Certificate */
-#endif
 		{NULL, 0, NULL, NULL, 0}
 	};
 
@@ -124,32 +123,14 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 		  4, 4, 8, SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
 		  SC_PKCS15_PIN_FLAG_LOCAL, -1, 0x00,
 		  SC_PKCS15_CO_FLAG_MODIFIABLE | SC_PKCS15_CO_FLAG_PRIVATE },
-#if 0
-		{ "02", "PIN.SIG", "3F00DF70", 0x81, /* Signature PIN */
-		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
-		  6, 6, 8, SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
-		  SC_PKCS15_PIN_FLAG_LOCAL, -1, 0x00,
-		  SC_PKCS15_CO_FLAG_MODIFIABLE | SC_PKCS15_CO_FLAG_PRIVATE }, 
-		{ "03", "PIN.INF", "3F00DF71", 0x83, /* Infobox PIN */
-		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
-		  4, 4, 8, SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
-		  SC_PKCS15_PIN_FLAG_LOCAL, -1, 0x00,
-		  SC_PKCS15_CO_FLAG_MODIFIABLE | SC_PKCS15_CO_FLAG_PRIVATE },
-#endif
 		{ NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0} 
 	};
 
 	const prdata prkeys[] = {
-		{ "1", "SK.CH.EKEY", 1536,
+		{ "01", "SK.CH.EKEY", 1536,
 			SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_DECRYPT | SC_PKCS15_PRKEY_USAGE_UNWRAP,
 		  "", /* do not specify file here to prevent reset of security state */
 		  0x88, "01", SC_PKCS15_CO_FLAG_PRIVATE},
-#if 0
-		{ "2", "SK.CH.DS", 192,
-			SC_PKCS15_PRKEY_USAGE_SIGN,
-		  "", /* do not specify file here to prevent reset of security state */
-		  0x88, "02", SC_PKCS15_CO_FLAG_PRIVATE},
-#endif
 		{ NULL, NULL, 0, 0, NULL, 0, NULL, 0}
 	};
 
@@ -237,6 +218,7 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 		pin_info.attrs.pin.pad_char      = pins[i].pad_char;
 		sc_format_path(pins[i].path, &pin_info.path);
 		pin_info.tries_left    = -1;
+		pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 
 		strlcpy(pin_obj.label, pins[i].label, sizeof(pin_obj.label));
 		pin_obj.flags = pins[i].obj_flags;
@@ -284,6 +266,7 @@ static int sc_pkcs15emu_atrust_acos_init(sc_pkcs15_card_t *p15card)
 }
 
 int sc_pkcs15emu_atrust_acos_init_ex(sc_pkcs15_card_t *p15card,
+				  struct sc_aid *aid,
 				  sc_pkcs15emu_opt_t *opts)
 {
 

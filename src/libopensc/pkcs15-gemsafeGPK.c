@@ -19,7 +19,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +35,7 @@
 
 #define MANU_ID		"GemSAFE on GPK16000"
 
-int sc_pkcs15emu_gemsafeGPK_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_gemsafeGPK_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static int (*pin_cmd_save)(struct sc_card *, struct sc_pin_cmd_data *, 
 		int *tries_left);
@@ -180,7 +182,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	};
 
 	const pindata pins[] = {
-		{ "1", "pin", "3F000200", 0x00,
+		{ "01", "pin", "3F000200", 0x00,
 		  SC_PKCS15_PIN_TYPE_ASCII_NUMERIC,
 		  8, 4, 8, SC_PKCS15_PIN_FLAG_NEEDS_PADDING |
 		  SC_PKCS15_PIN_FLAG_LOCAL, -1, 0x00,
@@ -189,8 +191,8 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	};
 
 	const prdata prkeys[] = {
-		{ "1", "AUTH key", 1024, USAGE_AUT, "I0009",
-		  0x00, "1", 0},
+		{ "01", "AUTH key", 1024, USAGE_AUT, "I0009",
+		  0x00, "01", 0},
 		{ NULL, NULL, 0, 0, NULL, 0, NULL, 0}
 	};
 
@@ -223,9 +225,11 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	p15card->tokeninfo->manufacturer_id = strdup(MANU_ID);
 	/* get serial number */
         r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+		if (r != SC_SUCCESS)
+			return SC_ERROR_INTERNAL;
         r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
-        if (r != SC_SUCCESS)
-                return SC_ERROR_INTERNAL;
+		if (r != SC_SUCCESS)
+			return SC_ERROR_INTERNAL;
         p15card->tokeninfo->serial_number = strdup(buf);
 
 	/* test if we have a gemsafe app df */
@@ -246,7 +250,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 
 	/* we will use dfpath in all other references */
 	dfpath = file->id;
-	free(file);
+	sc_file_free(file);
 	file = NULL;
 
 	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "GemSafe file found, id=%d",dfpath);
@@ -281,7 +285,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 		}
 
 		kinfo[num_keyinfo].fileid = i;
-		sc_pkcs15_format_id("NONE", &kinfo[num_keyinfo].id); 
+		sc_pkcs15_format_id("", &kinfo[num_keyinfo].id); 
 
 		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,"reading modulus");
 		r = sc_read_record(card, 2, modulus_buf, 
@@ -449,6 +453,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 		pin_info.path.value[2] = dfpath >> 8;
 		pin_info.path.value[3] = dfpath & 0xff;
 		pin_info.tries_left    = -1;
+		pin_info.logged_in = SC_PIN_STATE_UNKNOWN;
 
 		strlcpy(pin_obj.label, pins[i].label, sizeof(pin_obj.label));
 		pin_obj.flags = pins[i].obj_flags;
@@ -484,8 +489,8 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	
 		for (j = 0; j < num_keyinfo; j++) {
 			if (sc_pkcs15_compare_id(&kinfo[j].id, &prkey_info.id))  {
-				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found key in file %d for id %d", 
-						kinfo[j].fileid, prkey_info.id);
+				sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "found key in file %d for id %s",
+					 kinfo[j].fileid, prkeys[i].id);
 				prkey_info.path.value[0] = kinfo[j].fileid >> 8;
 				prkey_info.path.value[1] = kinfo[j].fileid & 0xff;
 				break;
@@ -504,7 +509,7 @@ static int sc_pkcs15emu_gemsafeGPK_init(sc_pkcs15_card_t *p15card)
 	return SC_SUCCESS;
 }
 
-int sc_pkcs15emu_gemsafeGPK_init_ex(sc_pkcs15_card_t *p15card,
+int sc_pkcs15emu_gemsafeGPK_init_ex(sc_pkcs15_card_t *p15card, struct sc_aid *aid,
 				  sc_pkcs15emu_opt_t *opts)
 {
 	sc_card_t   *card = p15card->card;

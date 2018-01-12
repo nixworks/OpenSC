@@ -1,9 +1,9 @@
 /*
  * card-mcrd.c: Support for MICARDO cards
  *
- * Copyright (C) 2004  Martin Paljak <martin@paljak.pri.ee>
+ * Copyright (C) 2004  Martin Paljak <martin@martinpaljak.net>
  * Copyright (C) 2004  Priit Randla <priit.randla@eyp.ee>
- * Copyright (C) 2003  Marie Fischer <marie@vtl.ee> 
+ * Copyright (C) 2003  Marie Fischer <marie@vtl.ee>
  * Copyright (C) 2001  Juha Yrjölä <juha.yrjola@iki.fi>
  * Copyright (C) 2002  g10 Code GmbH
  *
@@ -22,7 +22,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,10 +54,14 @@ static struct sc_atr_table mcrd_atrs[] = {
 	{"3B:FE:18:00:00:80:31:FE:45:80:31:80:66:40:90:A4:56:1B:16:83:01:90:00:86", NULL, "EstEID 3.0 (dev1) warm", SC_CARD_TYPE_MCRD_ESTEID_V30, 0, NULL},
 	{"3b:fe:18:00:00:80:31:fe:45:80:31:80:66:40:90:a4:16:2a:00:83:01:90:00:e1", NULL, "EstEID 3.0 (dev2) warm", SC_CARD_TYPE_MCRD_ESTEID_V30, 0, NULL},
 	{"3b:fe:18:00:00:80:31:fe:45:80:31:80:66:40:90:a4:16:2a:00:83:0f:90:00:ef", NULL, "EstEID 3.0 (18.01.2011) warm", SC_CARD_TYPE_MCRD_ESTEID_V30, 0, NULL},
+	{"3b:fa:18:00:00:80:31:fe:45:fe:65:49:44:20:2f:20:50:4b:49:03", NULL, "EstEID 3.5 cold", SC_CARD_TYPE_MCRD_ESTEID_V30, 0, NULL },
+	{"3b:f8:18:00:00:80:31:fe:45:fe:41:5a:45:20:44:49:54:33", NULL, "AzeDIT 3.5 cold", SC_CARD_TYPE_MCRD_ESTEID_V30, 0, NULL },
 	{NULL, NULL, NULL, 0, 0, NULL}
 };
 
-static unsigned char EstEID_v3_AID[] = {0xF0, 0x45, 0x73, 0x74, 0x45, 0x49, 0x44, 0x20, 0x76, 0x65, 0x72, 0x20, 0x31, 0x2E, 0x30};
+static const unsigned char EstEID_v3_AID[] = {0xF0, 0x45, 0x73, 0x74, 0x45, 0x49, 0x44, 0x20, 0x76, 0x65, 0x72, 0x20, 0x31, 0x2E, 0x30};
+static const unsigned char EstEID_v35_AID[] = {0xD2, 0x33, 0x00, 0x00, 0x00, 0x45, 0x73, 0x74, 0x45, 0x49, 0x44, 0x20, 0x76, 0x33, 0x35};
+static const unsigned char AzeDIT_v35_AID[] = {0xD0, 0x31, 0x00, 0x00, 0x00, 0x44, 0x69, 0x67, 0x69, 0x49, 0x44};
 
 static struct sc_card_operations mcrd_ops;
 static struct sc_card_driver mcrd_drv = {
@@ -113,6 +119,24 @@ struct mcrd_priv_data {
 
 #define DRVDATA(card)        ((struct mcrd_priv_data *) ((card)->drv_data))
 
+// Control Reference Template Tag for Key Agreement (ISO 7816-4:2013 Table 54)
+static const struct sc_asn1_entry c_asn1_control[] = {
+	{ "control", SC_ASN1_STRUCT, SC_ASN1_CONS | SC_ASN1_CTX | 0xA6, 0, NULL, NULL },
+	{ NULL, 0, 0, 0, NULL, NULL }
+};
+
+// Ephemeral public key Template Tag (ISO 7816-8:2016 Table 3)
+static const struct sc_asn1_entry c_asn1_ephermal[] = {
+	{ "ephemeral", SC_ASN1_STRUCT, SC_ASN1_CONS | SC_ASN1_APP | 0x7F49, 0, NULL, NULL },
+	{ NULL, 0, 0, 0, NULL, NULL }
+};
+
+// External Public Key
+static const struct sc_asn1_entry c_asn1_public[] = {
+	{ "publicKey", SC_ASN1_OCTET_STRING, SC_ASN1_CTX | 0x86, 0, NULL, NULL },
+	{ NULL, 0, 0, 0, NULL, NULL }
+};
+
 static int load_special_files(sc_card_t * card);
 static int select_part(sc_card_t * card, u8 kind, unsigned short int fid,
 		       sc_file_t ** file);
@@ -128,7 +152,7 @@ static struct df_info_s *get_df_info(sc_card_t * card)
 	assert(!priv->is_ef);
 
 	if (!priv->curpathlen) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "no current path to find the df_info\n");
+		sc_log(ctx, "no current path to find the df_info\n");
 		return NULL;
 	}
 
@@ -141,7 +165,7 @@ static struct df_info_s *get_df_info(sc_card_t * card)
 	/* Not found, create it. */
 	dfi = calloc(1, sizeof *dfi);
 	if (!dfi) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "out of memory while allocating df_info\n");
+		sc_log(ctx, "out of memory while allocating df_info\n");
 		return NULL;
 	}
 	dfi->pathlen = priv->curpathlen;
@@ -229,11 +253,11 @@ static int mcrd_set_decipher_key_ref(sc_card_t * card, int key_reference)
 			   SC_ESTEID_KEYREF_FILE_RECLEN, SC_RECORD_BY_REC_NR);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Can't read keyref info file!");
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(card->ctx,
 		 "authkey reference 0x%02x%02x\n",
 		 keyref_data[9], keyref_data[10]);
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(card->ctx,
 		 "signkey reference 0x%02x%02x\n",
 		 keyref_data[19], keyref_data[20]);
 
@@ -270,18 +294,35 @@ int is_esteid_card(sc_card_t *card) {
 }
 static int mcrd_match_card(sc_card_t * card)
 {
-	int i = 0;
+	int i = 0, r = 0;
+	sc_apdu_t apdu;
+
 	i = _sc_match_atr(card, mcrd_atrs, &card->type);
 	if (i >= 0) {
 		card->name = mcrd_atrs[i].name;
 		return 1;
+	}
+
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_3, 0xA4, 0x04, 0x00);
+	apdu.lc = sizeof(EstEID_v35_AID);
+	apdu.data = EstEID_v35_AID;
+	apdu.datalen = sizeof(EstEID_v35_AID);
+	apdu.resplen = 0;
+	apdu.le = 0;
+	r = sc_transmit_apdu(card, &apdu);
+	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+	sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "SELECT AID: %02X%02X", apdu.sw1, apdu.sw2);
+	if(apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
+	        sc_log(card->ctx, "AID found");
+	        card->type = SC_CARD_TYPE_MCRD_ESTEID_V30;
+	        return 1;
 	}
 	return 0;
 }
 
 static int mcrd_init(sc_card_t * card)
 {
-	unsigned long flags;
+	unsigned long flags, ext_flags;
 	struct mcrd_priv_data *priv;
 	int r;
 	sc_path_t tmppath;
@@ -306,6 +347,10 @@ static int mcrd_init(sc_card_t * card)
 			flags = SC_ALGORITHM_RSA_RAW | SC_ALGORITHM_RSA_HASH_SHA1 | SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_SHA256;
 			/* EstEID v3.0 has 2048 bit keys */
 			_sc_card_add_rsa_alg(card, 2048, flags, 0);
+
+			flags = SC_ALGORITHM_ECDSA_RAW | SC_ALGORITHM_ECDH_CDH_RAW | SC_ALGORITHM_ECDSA_HASH_NONE;
+			ext_flags = SC_ALGORITHM_EXT_EC_NAMEDCURVE | SC_ALGORITHM_EXT_EC_UNCOMPRESES;
+			_sc_card_add_ec_alg(card, 384, flags, ext_flags, NULL);
 			sc_reset(card, 0);
 
 			sc_format_apdu(card, &apdu, SC_APDU_CASE_3, 0xA4, 0x04, 0x00);
@@ -318,7 +363,38 @@ static int mcrd_init(sc_card_t * card)
 			SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 			sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "SELECT AID: %02X%02X", apdu.sw1, apdu.sw2);
 			if(apdu.sw1 != 0x90 && apdu.sw2 != 0x00)
-				SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE,  SC_ERROR_CARD_CMD_FAILED);
+			{
+				sc_format_apdu(card, &apdu, SC_APDU_CASE_3, 0xA4, 0x04, 0x00);
+				apdu.lc = sizeof(EstEID_v35_AID);
+				apdu.data = EstEID_v35_AID;
+				apdu.datalen = sizeof(EstEID_v35_AID);
+				apdu.resplen = 0;
+				apdu.le = 0;
+				r = sc_transmit_apdu(card, &apdu);
+				SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+				sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "SELECT AID: %02X%02X", apdu.sw1, apdu.sw2);
+				if (apdu.sw1 == 0x90 && apdu.sw2 == 0x00) {
+					// Force EstEID 3.5 card recv size 255 with T=0 to avoid recursive read binary
+					// sc_read_binary cannot handle recursive 61 00 calls
+					if (card->reader && card->reader->active_protocol == SC_PROTO_T0)
+						card->max_recv_size = 255;
+				} else {
+					sc_format_apdu(card, &apdu, SC_APDU_CASE_3, 0xA4, 0x04, 0x00);
+					apdu.lc = sizeof(AzeDIT_v35_AID);
+					apdu.data = AzeDIT_v35_AID;
+					apdu.datalen = sizeof(AzeDIT_v35_AID);
+					apdu.resplen = 0;
+					apdu.le = 0;
+					r = sc_transmit_apdu(card, &apdu);
+					SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
+					sc_debug(card->ctx, SC_LOG_DEBUG_VERBOSE, "SELECT AID: %02X%02X", apdu.sw1, apdu.sw2);
+					if (apdu.sw1 != 0x90 && apdu.sw2 != 0x00) {
+						free(card->drv_data);
+						card->drv_data = NULL;
+						SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_CARD);
+					}
+				}
+			}
 		} else {
 			/* EstEID v1.0 and 1.1 have 1024 bit keys */
 			flags = SC_ALGORITHM_RSA_RAW | SC_ALGORITHM_RSA_PAD_PKCS1 | SC_ALGORITHM_RSA_HASH_SHA1;
@@ -335,13 +411,13 @@ static int mcrd_init(sc_card_t * card)
 	priv->curpathlen = 1;
 
 	sc_format_path ("3f00", &tmppath);
-	sc_select_file (card, &tmppath, NULL);
+	r = sc_select_file (card, &tmppath, NULL);
 
 	/* Not needed for the fixed EstEID profile */
 	if (!is_esteid_card(card))
 		load_special_files(card);
 
-	return SC_SUCCESS;
+	return r;
 }
 
 static int mcrd_finish(sc_card_t * card)
@@ -375,6 +451,8 @@ static int load_special_files(sc_card_t * card)
 	if (dfi && dfi->rule_file)
 		return 0;	/* yes. */
 	clear_special_files(dfi);
+	if (!dfi)
+		SC_FUNC_RETURN(ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_INTERNAL);
 
 	/* Read rule file. Note that we bypass our cache here. */
 	r = select_part(card, MCRD_SEL_EF, EF_Rule, NULL);
@@ -401,12 +479,12 @@ static int load_special_files(sc_card_t * card)
 		}
 	}
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "new EF_Rule file loaded (%d records)\n", recno - 1);
+	sc_log(ctx, "new EF_Rule file loaded (%d records)\n", recno - 1);
 
 	/* Read the KeyD file. Note that we bypass our cache here. */
 	r = select_part(card, MCRD_SEL_EF, EF_KeyD, NULL);
 	if (r == SC_ERROR_FILE_NOT_FOUND) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "no EF_KeyD file available\n");
+		sc_log(ctx, "no EF_KeyD file available\n");
 		return 0;	/* That is okay. */
 	}
 	SC_TEST_RET(ctx, SC_LOG_DEBUG_NORMAL, r, "selecting EF_KeyD failed");
@@ -432,7 +510,7 @@ static int load_special_files(sc_card_t * card)
 		}
 	}
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "new EF_KeyD file loaded (%d records)\n", recno - 1);
+	sc_log(ctx, "new EF_KeyD file loaded (%d records)\n", recno - 1);
 	/* FIXME: Do we need to restore the current DF?  I guess it is
 	   not required, but we could try to do so by selecting 3fff?  */
 	return 0;
@@ -449,15 +527,14 @@ static int get_se_num_from_keyd(sc_card_t * card, unsigned short fid,
 	struct keyd_record_s *keyd;
 	size_t len, taglen;
 	const u8 *p, *tag;
-	char dbgbuf[2048];
 	u8 fidbuf[2];
 
-	fidbuf[0] = fid >> 8;
-	fidbuf[1] = fid;
+	fidbuf[0] = (fid >> 8) & 0xFF;
+	fidbuf[1] = fid & 0xFF;
 
 	dfi = get_df_info(card);
 	if (!dfi || !dfi->keyd_file) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "EF_keyD not loaded\n");
+		sc_log(ctx, "EF_keyD not loaded\n");
 		return -1;
 	}
 
@@ -465,9 +542,8 @@ static int get_se_num_from_keyd(sc_card_t * card, unsigned short fid,
 		p = keyd->data;
 		len = keyd->datalen;
 
-		sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-			p, len, dbgbuf, sizeof dbgbuf);
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "keyd no %d:\n%s", keyd->recno, dbgbuf);
+		sc_log(ctx, "keyd no %d", keyd->recno);
+		sc_debug_hex(ctx, SC_LOG_DEBUG_NORMAL, "", p, len);
 
 		tag = sc_asn1_find_tag(ctx, p, len, 0x83, &taglen);
 		if (!tag || taglen != 4 ||
@@ -490,7 +566,7 @@ static int get_se_num_from_keyd(sc_card_t * card, unsigned short fid,
 			continue;
 		return *tag;	/* found. */
 	}
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "EF_keyD for %04hx not found\n", fid);
+	sc_log(ctx, "EF_keyD for %04hx not found\n", fid);
 	return -1;
 }
 
@@ -509,7 +585,7 @@ static void process_arr(sc_card_t * card, sc_file_t * file,
 
 	/* Currently we support only the short for. */
 	if (buflen != 1) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "can't handle long ARRs\n");
+		sc_log(ctx, "can't handle long ARRs\n");
 		return;
 	}
 
@@ -517,13 +593,12 @@ static void process_arr(sc_card_t * card, sc_file_t * file,
 	for (rule = dfi ? dfi->rule_file : NULL; rule && rule->recno != *buf;
 	     rule = rule->next) ;
 	if (!rule) {
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "referenced EF_rule record %d not found\n", *buf);
+		sc_log(ctx, "referenced EF_rule record %d not found\n", *buf);
 		return;
 	}
 
-	sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL,
-		rule->data, rule->datalen, dbgbuf, sizeof dbgbuf);
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+	sc_hex_dump(rule->data, rule->datalen, dbgbuf, sizeof dbgbuf);
+	sc_log(ctx,
 		"rule for record %d:\n%s", *buf, dbgbuf);
 
 	p = rule->data;
@@ -540,11 +615,11 @@ static void process_arr(sc_card_t * card, sc_file_t * file,
 		if (tag == 0x80 && taglen != 1) {
 			skip = 1;
 		} else if (tag == 0x80) {	/* AM byte. */
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "  AM_DO: %02x\n", *p);
+			sc_log(ctx, "  AM_DO: %02x\n", *p);
 			skip = 0;
 		} else if (tag >= 0x81 && tag <= 0x8f) {	/* Cmd description */
-			sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, p, taglen, dbgbuf, sizeof dbgbuf);
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "  AM_DO: cmd[%s%s%s%s] %s",
+			sc_hex_dump(p, taglen, dbgbuf, sizeof dbgbuf);
+			sc_log(ctx, "  AM_DO: cmd[%s%s%s%s] %s",
 				 (tag & 8) ? "C" : "",
 				 (tag & 4) ? "I" : "",
 				 (tag & 2) ? "1" : "",
@@ -553,33 +628,32 @@ static void process_arr(sc_card_t * card, sc_file_t * file,
 		} else if (tag == 0x9C) {	/* Proprietary state machine descrip. */
 			skip = 1;
 		} else if (!skip) {
-			sc_hex_dump(ctx, SC_LOG_DEBUG_NORMAL, p, taglen, dbgbuf, sizeof dbgbuf);
 			switch (tag) {
 			case 0x90:	/* Always */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: always\n");
+				sc_log(ctx, "     SC: always\n");
 				break;
 			case 0x97:	/* Never */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: never\n");
+				sc_log(ctx, "     SC: never\n");
 				break;
 			case 0xA4:	/* Authentication, value is a CRT. */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: auth %s", dbgbuf);
+				sc_log_hex(ctx, "     SC: auth", p, taglen);
 				break;
 
 			case 0xB4:
 			case 0xB6:
 			case 0xB8:	/* Cmd or resp with SM, value is a CRT. */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: cmd/resp %s", dbgbuf);
+				sc_log_hex(ctx, "     SC: cmd/resp", p, taglen);
 				break;
 
 			case 0x9E:	/* Security Condition byte. */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: condition %s", dbgbuf);
+				sc_log_hex(ctx, "     SC: condition", p, taglen);
 				break;
 
 			case 0xA0:	/* OR template. */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: OR\n");
+				sc_log(ctx, "     SC: OR\n");
 				break;
 			case 0xAF:	/* AND template. */
-				sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "     SC: AND\n");
+				sc_log(ctx, "     SC: AND\n");
 				break;
 			}
 		}
@@ -597,13 +671,13 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 	const u8 *tag = NULL, *p = buf;
 	int bad_fde = 0;
 
-	sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "processing FCI bytes\n");
+	sc_log(ctx, "processing FCI bytes\n");
 
 	/* File identifier. */
 	tag = sc_asn1_find_tag(ctx, p, len, 0x83, &taglen);
 	if (tag != NULL && taglen == 2) {
 		file->id = (tag[0] << 8) | tag[1];
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx,
 			"  file identifier: 0x%02X%02X\n", tag[0], tag[1]);
 	}
 	/* Number of data bytes in the file including structural information. */
@@ -618,7 +692,7 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 	}
 	if (tag != NULL && taglen >= 2) {
 		int bytes = (tag[0] << 8) + tag[1];
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+		sc_log(ctx,
 			"  bytes in file: %d\n", bytes);
 		file->size = bytes;
 	}
@@ -626,7 +700,7 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 		tag = sc_asn1_find_tag(ctx, p, len, 0x80, &taglen);
 		if (tag != NULL && taglen >= 2) {
 			int bytes = (tag[0] << 8) + tag[1];
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(ctx,
 				"  bytes in file: %d\n", bytes);
 			file->size = bytes;
 		}
@@ -641,7 +715,7 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 			const char *type;
 
 			file->shareable = byte & 0x40 ? 1 : 0;
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(ctx,
 				"  shareable: %s\n",
 				 (byte & 0x40) ? "yes" : "no");
 			file->ef_structure = byte & 0x07;
@@ -662,9 +736,9 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 				type = "unknown";
 				break;
 			}
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(ctx,
 				"  type: %s\n", type);
-			sc_debug(ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(ctx,
 				"  EF structure: %d\n", byte & 0x07);
 		}
 	}
@@ -686,7 +760,7 @@ static void process_fcp(sc_card_t * card, sc_file_t * file,
 				name[i] = '?';
 		}
 		name[taglen] = 0;
-		sc_debug(ctx, SC_LOG_DEBUG_NORMAL, "  file name: %s\n", name);
+		sc_log(ctx, "  file name: %s\n", name);
 	}
 
 	/* Proprietary information. */
@@ -762,6 +836,8 @@ do_select(sc_card_t * card, u8 kind,
 	if (p2 == 0x0C) {
 		if (file) {
 			*file = sc_file_new();
+			if (!*file)
+				SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_NORMAL, SC_ERROR_OUT_OF_MEMORY);
 			(*file)->type = SC_FILE_TYPE_DF;
 			return SC_SUCCESS;
 		}
@@ -800,7 +876,7 @@ select_part(sc_card_t * card, u8 kind, unsigned short int fid,
 	unsigned int len;
 	int r;
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+	sc_log(card->ctx,
 		"select_part (0x%04X, kind=%u)\n", fid, kind);
 
 	if (fid == MFID) {
@@ -1031,7 +1107,7 @@ mcrd_select_file(sc_card_t * card, const sc_path_t * path, sc_file_t ** file)
 			linep += 4;
 		}
 		strcpy(linep, "\n");
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, line);
+		sc_log(card->ctx, "%s", line);
 	}
 
 	if (path->type == SC_PATH_TYPE_DF_NAME) {
@@ -1094,7 +1170,7 @@ mcrd_select_file(sc_card_t * card, const sc_path_t * path, sc_file_t ** file)
 			linep += 4;
 		}
 		strcpy(linep, "\n");
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, line);
+		sc_log(card->ctx, "%s", line);
 	}
 	return r;
 }
@@ -1135,7 +1211,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 	if (is_esteid_card(card)) {
 		/* some sanity checks */
 		if (env->flags & SC_SEC_ENV_ALG_PRESENT) {
-			if (env->algorithm != SC_ALGORITHM_RSA)
+			if (env->algorithm != SC_ALGORITHM_RSA && env->algorithm != SC_ALGORITHM_EC)
 				return SC_ERROR_INVALID_ARGUMENTS;
 		}
 		if (!(env->flags & SC_SEC_ENV_KEY_REF_PRESENT)
@@ -1144,12 +1220,15 @@ static int mcrd_set_security_env(sc_card_t * card,
 
 		/* Make sure we always start from MF */
 		sc_format_path ("3f00", &tmppath);
-		sc_select_file (card, &tmppath, NULL);
+		r = sc_select_file (card, &tmppath, NULL);
+		if (r < 0)
+			return r;
 		/* We now know that cache is not valid */
 		select_esteid_df(card);
 		switch (env->operation) {
 		case SC_SEC_OPERATION_DECIPHER:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		case SC_SEC_OPERATION_DERIVE:
+			sc_log(card->ctx,
 				 "Using keyref %d to dechiper\n",
 				 env->key_ref[0]);
 			mcrd_restore_se(card, 6);
@@ -1158,7 +1237,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 			mcrd_set_decipher_key_ref(card, env->key_ref[0]);
 			break;
 		case SC_SEC_OPERATION_SIGN:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Using keyref %d to sign\n",
+			sc_log(card->ctx, "Using keyref %d to sign\n",
 				 env->key_ref[0]);
 			mcrd_restore_se(card, 1);
 			break;
@@ -1171,7 +1250,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 
 	if (card->type == SC_CARD_TYPE_MCRD_DTRUST
 	    || card->type == SC_CARD_TYPE_MCRD_GENERIC) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Using SC_CARD_TYPE_MCRD_DTRUST\n");
+		sc_log(card->ctx, "Using SC_CARD_TYPE_MCRD_DTRUST\n");
 		/* some sanity checks */
 		if (env->flags & SC_SEC_ENV_ALG_PRESENT) {
 			if (env->algorithm != SC_ALGORITHM_RSA)
@@ -1183,7 +1262,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 
 		switch (env->operation) {
 		case SC_SEC_OPERATION_DECIPHER:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx,
 				 "Using keyref %d to dechiper\n",
 				 env->key_ref[0]);
 			mcrd_delete_ref_to_authkey(card);
@@ -1191,7 +1270,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 			mcrd_set_decipher_key_ref(card, env->key_ref[0]);
 			break;
 		case SC_SEC_OPERATION_SIGN:
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "Using keyref %d to sign\n",
+			sc_log(card->ctx, "Using keyref %d to sign\n",
 				 env->key_ref[0]);
 			break;
 		default:
@@ -1221,7 +1300,7 @@ static int mcrd_set_security_env(sc_card_t * card,
 
 	if (card->type == SC_CARD_TYPE_MCRD_DTRUST
 	    || card->type == SC_CARD_TYPE_MCRD_GENERIC) {
-		unsigned short fid;
+		unsigned char fid;
 
 		fid = env->key_ref[0];
 		*p = fid;
@@ -1264,13 +1343,13 @@ static int mcrd_set_security_env(sc_card_t * card,
 	if (apdu.datalen != 0) {
 		r = sc_transmit_apdu(card, &apdu);
 		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx,
 				"%s: APDU transmit failed", sc_strerror(r));
 			goto err;
 		}
 		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		if (r) {
-			sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+			sc_log(card->ctx,
 				"%s: Card returned error", sc_strerror(r));
 			goto err;
 		}
@@ -1292,19 +1371,22 @@ static int mcrd_compute_signature(sc_card_t * card,
 				  u8 * out, size_t outlen)
 {
 	struct mcrd_priv_data *priv = DRVDATA(card);
-	sc_security_env_t *env = &priv->sec_env;
+	sc_security_env_t *env = NULL;
 	int r;
 	sc_apdu_t apdu;
 
-	assert(card != NULL && data != NULL && out != NULL);
+	if (card == NULL || data == NULL || out == NULL)
+		return SC_ERROR_INVALID_ARGUMENTS;
+	env = &priv->sec_env;
+
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_NORMAL);
 	if (env->operation != SC_SEC_OPERATION_SIGN)
 		return SC_ERROR_INVALID_ARGUMENTS;
 	if (datalen > 255)
 		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
-		 "Will compute signature (%d) for %d (0x%02x) bytes using key %d algorithm %d flags %d\n",
+	sc_log(card->ctx,
+		 "Will compute signature (%d) for %"SC_FORMAT_LEN_SIZE_T"u (0x%02"SC_FORMAT_LEN_SIZE_T"x) bytes using key %d algorithm %d flags %d\n",
 		 env->operation, datalen, datalen, env->key_ref[0],
 		 env->algorithm, env->algorithm_flags);
 
@@ -1320,7 +1402,7 @@ static int mcrd_compute_signature(sc_card_t * card,
 	apdu.lc = datalen;
 	apdu.data = data;
 	apdu.datalen = datalen;
-	apdu.le = 0x80;
+	apdu.le = MIN(0x80u, outlen);
 	apdu.resp = out;
 	apdu.resplen = outlen;
 
@@ -1328,6 +1410,62 @@ static int mcrd_compute_signature(sc_card_t * card,
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "Card returned error");
+
+	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, apdu.resplen);
+}
+
+static int mcrd_decipher(struct sc_card *card,
+						 const u8 * crgram, size_t crgram_len,
+						 u8 * out, size_t outlen)
+{
+	sc_security_env_t *env = NULL;
+	int r = 0;
+	size_t sbuf_len = 0;
+	sc_apdu_t apdu;
+	u8 *sbuf = NULL;
+	struct sc_asn1_entry asn1_control[2], asn1_ephermal[2], asn1_public[2];
+
+	if (card == NULL || crgram == NULL || out == NULL)
+		return SC_ERROR_INVALID_ARGUMENTS;
+	env = &DRVDATA(card)->sec_env;
+
+	LOG_FUNC_CALLED(card->ctx);
+	if (env->operation != SC_SEC_OPERATION_DERIVE)
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, iso_ops->decipher(card, crgram, crgram_len, out, outlen));
+	if (crgram_len > 255)
+		SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, SC_ERROR_INVALID_ARGUMENTS);
+
+	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL,
+		 "Will dervie (%d) for %"SC_FORMAT_LEN_SIZE_T"u (0x%02"SC_FORMAT_LEN_SIZE_T"x) bytes using key %d algorithm %d flags %d\n",
+		 env->operation, crgram_len, crgram_len, env->key_ref[0],
+		 env->algorithm, env->algorithm_flags);
+
+	// Encode TLV
+	sc_copy_asn1_entry(c_asn1_control, asn1_control);
+	sc_copy_asn1_entry(c_asn1_ephermal, asn1_ephermal);
+	sc_copy_asn1_entry(c_asn1_public, asn1_public);
+	sc_format_asn1_entry(asn1_public + 0, (void*)crgram, &crgram_len, 1);
+	sc_format_asn1_entry(asn1_ephermal + 0, &asn1_public, NULL, 1);
+	sc_format_asn1_entry(asn1_control + 0, &asn1_ephermal, NULL, 1);
+	r = sc_asn1_encode(card->ctx, asn1_control, &sbuf, &sbuf_len);
+	LOG_TEST_RET(card->ctx, r, "Error encoding TLV.");
+
+	// Create APDU
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_4, 0x2A, 0x80, 0x86);
+	apdu.lc = sbuf_len;
+	apdu.data = sbuf;
+	apdu.datalen = sbuf_len;
+	apdu.le = MIN(0x80u, outlen);
+	apdu.resp = out;
+	apdu.resplen = outlen;
+
+	r = sc_transmit_apdu(card, &apdu);
+	sc_mem_clear(sbuf, sbuf_len);
+	free(sbuf);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
 
 	SC_FUNC_RETURN(card->ctx, SC_LOG_DEBUG_VERBOSE, apdu.resplen);
 }
@@ -1368,12 +1506,13 @@ static int mcrd_pin_cmd(sc_card_t * card, struct sc_pin_cmd_data *data,
 			return SC_ERROR_INTERNAL;
 		data->pin1.tries_left = buf[5];
 		data->pin1.max_tries = buf[2];
+		data->pin1.logged_in = SC_PIN_STATE_UNKNOWN;
 		return SC_SUCCESS;
 	}
 
 	if (card->type == SC_CARD_TYPE_MCRD_DTRUST
 	    || card->type == SC_CARD_TYPE_MCRD_GENERIC) {
-		sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "modify pin reference for D-Trust\n");
+		sc_log(card->ctx, "modify pin reference for D-Trust\n");
 		if (data->pin_reference == 0x02)
 			data->pin_reference = data->pin_reference | 0x80;
 	}
@@ -1394,6 +1533,7 @@ static struct sc_card_driver *sc_get_driver(void)
 	mcrd_ops.select_file = mcrd_select_file;
 	mcrd_ops.set_security_env = mcrd_set_security_env;
 	mcrd_ops.compute_signature = mcrd_compute_signature;
+	mcrd_ops.decipher = mcrd_decipher;
 	mcrd_ops.pin_cmd = mcrd_pin_cmd;
 
 	return &mcrd_drv;

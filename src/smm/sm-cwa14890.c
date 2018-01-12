@@ -43,21 +43,7 @@
 #include "libopensc/asn1.h"
 #include "libopensc/iasecc.h"
 #include "libopensc/iasecc-sdo.h"
-#if 0
-#include "libopensc/hash-strings.h"
-#endif
 #include "sm-module.h"
-
-static const struct sc_asn1_entry c_asn1_card_response[2] = {
-	{ "cardResponse", SC_ASN1_STRUCT, SC_ASN1_CTX | 1 | SC_ASN1_CONS, 0, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
-static const struct sc_asn1_entry c_asn1_iasecc_response[4] = {
-	{ "number",	SC_ASN1_INTEGER,	SC_ASN1_TAG_INTEGER,    0, NULL, NULL },
-	{ "status",	SC_ASN1_INTEGER, 	SC_ASN1_TAG_INTEGER,    0, NULL, NULL },
-	{ "data",       SC_ASN1_OCTET_STRING,   SC_ASN1_CTX | 2 | SC_ASN1_CONS, SC_ASN1_OPTIONAL, NULL, NULL },
-	{ NULL, 0, 0, 0, NULL, NULL }
-};
 
 int
 sm_cwa_get_mac(struct sc_context *ctx, unsigned char *key, DES_cblock *icv,
@@ -161,19 +147,29 @@ sm_cwa_decode_authentication_data(struct sc_context *ctx, struct sm_cwa_keyset *
 	rv = sm_decrypt_des_cbc3(ctx, keyset->enc, session_data->mdata, session_data->mdata_len, &decrypted, &decrypted_len);
 	LOG_TEST_RET(ctx, rv, "sm_ecc_decode_auth_data() DES CBC3 decrypt error");
 
-	sc_log(ctx, "sm_ecc_decode_auth_data() decrypted(%i) %s", decrypted_len, sc_dump_hex(decrypted, decrypted_len));
+	sc_log(ctx,
+	       "sm_ecc_decode_auth_data() decrypted(%"SC_FORMAT_LEN_SIZE_T"u) %s",
+	       decrypted_len, sc_dump_hex(decrypted, decrypted_len));
 
-	if (memcmp(decrypted, session_data->icc.rnd, 8))
+	if (memcmp(decrypted, session_data->icc.rnd, 8)) {
+		free(decrypted);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
+	}
 
-	if (memcmp(decrypted + 8, session_data->icc.sn, 8))
+	if (memcmp(decrypted + 8, session_data->icc.sn, 8)) {
+		free(decrypted);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
+	}
 
-	if (memcmp(decrypted + 16, session_data->ifd.rnd, 8))
+	if (memcmp(decrypted + 16, session_data->ifd.rnd, 8)) {
+		free(decrypted);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
+	}
 
-	if (memcmp(decrypted + 24, session_data->ifd.sn, 8))
+	if (memcmp(decrypted + 24, session_data->ifd.sn, 8)) {
+		free(decrypted);
 		LOG_FUNC_RETURN(ctx, SC_ERROR_UNKNOWN_DATA_RECEIVED);
+	}
 
 	memcpy(session_data->icc.k, decrypted + 32, 32);
 
@@ -210,6 +206,7 @@ sm_cwa_init_session_keys(struct sc_context *ctx, struct sm_cwa_session *session_
 		memcpy(&session_data->session_mac[0], buff, sizeof(session_data->session_mac));
 	}
 	else if (mechanism == IASECC_ALGORITHM_SYMMETRIC_SHA256)   {
+#if OPENSSL_VERSION_NUMBER >= 0x00908000L
 		xored[35] = 0x01;
 		SHA256(xored, 36, buff);
 		memcpy(&session_data->session_enc[0], buff, sizeof(session_data->session_enc));
@@ -217,6 +214,10 @@ sm_cwa_init_session_keys(struct sc_context *ctx, struct sm_cwa_session *session_
 		xored[35] = 0x02;
 		SHA256(xored, 36, buff);
 		memcpy(&session_data->session_mac[0], buff, sizeof(session_data->session_mac));
+#else
+		sc_log(ctx, "No FIPS, SHA256 is not supported");
+		return SC_ERROR_INVALID_ARGUMENTS;
+#endif
 	}
 	else   {
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -279,14 +280,16 @@ sm_cwa_initialize(struct sc_context *ctx, struct sm_info *sm_info, struct sc_rem
 	rv = sm_encrypt_des_cbc3(ctx, cwa_keyset->enc, buf, offs, &encrypted, &encrypted_len, 1);
 	LOG_TEST_RET(ctx, rv, "_encrypt_des_cbc3() failed");
 
-	sc_log(ctx, "ENCed(%i) %s", encrypted_len, sc_dump_hex(encrypted, encrypted_len));
+	sc_log(ctx, "ENCed(%"SC_FORMAT_LEN_SIZE_T"u) %s", encrypted_len,
+	       sc_dump_hex(encrypted, encrypted_len));
 
 	memcpy(buf, encrypted, encrypted_len);
 	offs = encrypted_len;
 
 	rv = sm_cwa_get_mac(ctx, cwa_keyset->mac, &icv, buf, offs, &cblock, 1);
 	LOG_TEST_RET(ctx, rv, "sm_ecc_get_mac() failed");
-	sc_log(ctx, "MACed(%i) %s", sizeof(cblock), sc_dump_hex(cblock, sizeof(cblock)));
+	sc_log(ctx, "MACed(%"SC_FORMAT_LEN_SIZE_T"u) %s", sizeof(cblock),
+	       sc_dump_hex(cblock, sizeof(cblock)));
 
 	apdu->cse = SC_APDU_CASE_4_SHORT;
 	apdu->cla = 0x00;
@@ -312,18 +315,21 @@ sm_cwa_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info, struct sc_
 	unsigned char sbuf[0x400];
 	DES_cblock cblock, icv;
 	unsigned char *encrypted = NULL, edfb_data[0x200], mac_data[0x200];
-	size_t encrypted_len, edfb_len = 0, mac_len = 0;
-	int rv, offs;
+	size_t encrypted_len, edfb_len = 0, mac_len = 0, offs;
+	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "securize APDU (cla:%X,ins:%X,p1:%X,p2:%X,data(%i):%p)",
-			apdu->cla, apdu->ins, apdu->p1, apdu->p2, apdu->datalen, apdu->data);
+	sc_log(ctx,
+	       "securize APDU (cla:%X,ins:%X,p1:%X,p2:%X,data(%"SC_FORMAT_LEN_SIZE_T"u):%p)",
+	       apdu->cla, apdu->ins, apdu->p1, apdu->p2, apdu->datalen,
+	       apdu->data);
 
 	sm_incr_ssc(session_data->ssc, sizeof(session_data->ssc));
 
 	rv = sm_encrypt_des_cbc3(ctx, session_data->session_enc, apdu->data, apdu->datalen, &encrypted, &encrypted_len, 0);
 	LOG_TEST_RET(ctx, rv, "securize APDU: DES CBC3 encryption failed");
-	sc_log(ctx, "encrypted data (len:%i, %s)", encrypted_len, sc_dump_hex(encrypted, encrypted_len));
+	sc_log(ctx, "encrypted data (len:%"SC_FORMAT_LEN_SIZE_T"u, %s)",
+	       encrypted_len, sc_dump_hex(encrypted, encrypted_len));
 
 	offs = 0;
 	if (apdu->ins & 0x01)   {
@@ -342,7 +348,8 @@ sm_cwa_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info, struct sc_
 	memcpy(edfb_data + offs, encrypted, encrypted_len);
 	offs += encrypted_len;
 	edfb_len = offs;
-	sc_log(ctx, "securize APDU: EDFB(len:%i,%sà", edfb_len, sc_dump_hex(edfb_data, edfb_len));
+	sc_log(ctx, "securize APDU: EDFB(len:%"SC_FORMAT_LEN_SIZE_T"u,%s)",
+	       edfb_len, sc_dump_hex(edfb_data, edfb_len));
 
 	free(encrypted);
 	encrypted = NULL;
@@ -369,7 +376,8 @@ sm_cwa_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info, struct sc_
 	/* } */
 
 	mac_len = offs;
-	sc_log(ctx, "securize APDU: MAC data(len:%i,%s)", mac_len, sc_dump_hex(mac_data, mac_len));
+	sc_log(ctx, "securize APDU: MAC data(len:%"SC_FORMAT_LEN_SIZE_T"u,%s)",
+	       mac_len, sc_dump_hex(mac_data, mac_len));
 
 	memset(icv, 0, sizeof(icv));
 	rv = sm_cwa_get_mac(ctx, session_data->session_mac, &icv, mac_data, mac_len, &cblock, 0);
@@ -392,7 +400,8 @@ sm_cwa_securize_apdu(struct sc_context *ctx, struct sm_info *sm_info, struct sc_
 	sbuf[offs++] = 8;
 	memcpy(sbuf + offs, cblock, 8);
 	offs += 8;
-	sc_log(ctx, "securize APDU: SM data(len:%i,%s)", offs, sc_dump_hex(sbuf, offs));
+	sc_log(ctx, "securize APDU: SM data(len:%"SC_FORMAT_LEN_SIZE_T"u,%s)",
+	       offs, sc_dump_hex(sbuf, offs));
 
 	if (offs > sizeof(rapdu->sbuf))
 		LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "securize APDU: buffer too small for encrypted data");

@@ -18,7 +18,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -320,7 +322,7 @@ static int miocos_get_acl(sc_card_t *card, sc_file_t *file)
 	u8 rbuf[256];
 	const u8 *seq = rbuf;
 	size_t left;
-	int acl_types[16], r;
+	int r;
 	unsigned int i;
 	
 	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0xCA, 0x01, 0x01);
@@ -331,8 +333,6 @@ static int miocos_get_acl(sc_card_t *card, sc_file_t *file)
 	SC_TEST_RET(card->ctx, SC_LOG_DEBUG_NORMAL, r, "APDU transmit failed");
 	if (apdu.resplen == 0)
 		return sc_check_sw(card, apdu.sw1, apdu.sw2);
-	for (i = 0; i < 16; i++)
-		acl_types[i] = SC_AC_KEY_REF_NONE;
 	left = apdu.resplen;
 	seq = sc_asn1_skip_tag(card->ctx, &seq, &left,
 			       SC_ASN1_SEQUENCE | SC_ASN1_CONS, &left);
@@ -383,7 +383,7 @@ static int miocos_select_file(sc_card_t *card,
 	r = iso_ops->select_file(card, in_path, file);
 	if (r)
 		return r;
-	if (file != NULL) {
+	if (file != NULL && *file != NULL) {
 		parse_sec_attr(*file, (*file)->sec_attr, (*file)->sec_attr_len);
 		miocos_get_acl(card, *file);
 	}
@@ -472,7 +472,7 @@ static int miocos_card_ctl(sc_card_t *card, unsigned long cmd,
 	case SC_CARDCTL_MIOCOS_CREATE_AC:
 		return miocos_create_ac(card, (struct sc_cardctl_miocos_ac_info *) arg);
 	}
-	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "card_ctl command 0x%X not supported\n", cmd);
+	sc_debug(card->ctx, SC_LOG_DEBUG_NORMAL, "card_ctl command 0x%lX not supported\n", cmd);
 	return SC_ERROR_NOT_SUPPORTED;
 }
 

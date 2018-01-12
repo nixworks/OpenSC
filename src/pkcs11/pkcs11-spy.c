@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Mathias Brossard <mathias.brossard@idealx.com>
+ * Copyright (C) 2015 Mathias Brossard <mathias@brossard.org>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -68,7 +68,7 @@ init_spy(void)
 	if (pkcs11_spy) {
 		/* with our own pkcs11.h we need to maintain this ourself */
 		pkcs11_spy->version.major = 2;
-		pkcs11_spy->version.major = 11;
+		pkcs11_spy->version.minor = 11;
 		pkcs11_spy->C_Initialize = C_Initialize;
 		pkcs11_spy->C_Finalize = C_Finalize;
 		pkcs11_spy->C_GetInfo = C_GetInfo;
@@ -172,7 +172,7 @@ init_spy(void)
 				}
 			}
 
-	                if( (rc == ERROR_SUCCESS) && (temp_len < PATH_MAX) )
+			if( (rc == ERROR_SUCCESS) && (temp_len < PATH_MAX) )
 				output = temp_path;
 			RegCloseKey( hKey );
 		}
@@ -256,7 +256,7 @@ enter(const char *function)
 	gettimeofday (&tv, NULL);
 	tm = localtime (&tv.tv_sec);
 	strftime (time_string, sizeof(time_string), "%F %H:%M:%S", tm);
-	fprintf(spy_output, "%s.%03ld\n", time_string, tv.tv_usec / 1000);
+	fprintf(spy_output, "%s.%03ld\n", time_string, (long)tv.tv_usec / 1000);
 #endif
 
 }
@@ -844,6 +844,26 @@ C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT
 	enter("C_DecryptInit");
 	spy_dump_ulong_in("hSession", hSession);
 	fprintf(spy_output, "pMechanism->type=%s\n", lookup_enum(MEC_T, pMechanism->mechanism));
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS_OAEP:
+		if (pMechanism->pParameter != NULL) {
+ 			CK_RSA_PKCS_OAEP_PARAMS *param =
+				(CK_RSA_PKCS_OAEP_PARAMS *) pMechanism->pParameter;
+			fprintf(spy_output, "pMechanism->pParameter->hashAlg=%s\n",
+				lookup_enum(MEC_T, param->hashAlg));
+			fprintf(spy_output, "pMechanism->pParameter->mgf=%s\n",
+				lookup_enum(MGF_T, param->mgf));
+			fprintf(spy_output, "pMechanism->pParameter->source=%lu\n", param->source);
+			spy_dump_string_out("pSourceData[ulSourceDalaLen]", 
+				param->pSourceData, param->ulSourceDataLen);
+		} else {
+			fprintf(spy_output, "Parameters block for %s is empty...\n",
+				lookup_enum(MEC_T, pMechanism->mechanism));
+		}
+		break;
+	default:
+		break;
+	}
 	spy_dump_ulong_in("hKey", hKey);
 	rv = po->C_DecryptInit(hSession, pMechanism, hKey);
 	return retne(rv);
@@ -969,6 +989,27 @@ C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HA
 	enter("C_SignInit");
 	spy_dump_ulong_in("hSession", hSession);
 	fprintf(spy_output, "pMechanism->type=%s\n", lookup_enum(MEC_T, pMechanism->mechanism));
+	switch (pMechanism->mechanism) {
+	case CKM_RSA_PKCS_PSS:
+	case CKM_SHA1_RSA_PKCS_PSS:
+	case CKM_SHA256_RSA_PKCS_PSS:
+	case CKM_SHA384_RSA_PKCS_PSS:
+	case CKM_SHA512_RSA_PKCS_PSS:
+		if (pMechanism->pParameter != NULL) {
+			CK_RSA_PKCS_PSS_PARAMS *param =
+				(CK_RSA_PKCS_PSS_PARAMS *) pMechanism->pParameter;
+			fprintf(spy_output, "pMechanism->pParameter->hashAlg=%s\n",
+				lookup_enum(MEC_T, param->hashAlg));
+			fprintf(spy_output, "pMechanism->pParameter->mgf=%s\n",
+				lookup_enum(MGF_T, param->mgf));
+			fprintf(spy_output, "pMechanism->pParameter->sLen=%lu\n",
+				param->sLen);
+		} else {
+			fprintf(spy_output, "Parameters block for %s is empty...\n",
+				lookup_enum(MEC_T, pMechanism->mechanism));
+		}
+		break;
+	}
 	spy_dump_ulong_in("hKey", hKey);
 	rv = po->C_SignInit(hSession, pMechanism, hKey);
 	return retne(rv);

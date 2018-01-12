@@ -15,7 +15,9 @@
  */
 /* Initially written by Weitao Sun (weitao@ftsafe.com) 2008*/
 
+#if HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +29,7 @@
 
 #define MANU_ID		"entersafe"
 
-int sc_pkcs15emu_entersafe_init_ex(sc_pkcs15_card_t *, sc_pkcs15emu_opt_t *);
+int sc_pkcs15emu_entersafe_init_ex(sc_pkcs15_card_t *, struct sc_aid *, sc_pkcs15emu_opt_t *);
 
 static int entersafe_detect_card( sc_pkcs15_card_t *p15card)
 {
@@ -53,6 +55,8 @@ static int sc_pkcs15emu_entersafe_init( sc_pkcs15_card_t *p15card)
 
 	/* get serial number */
 	r = sc_card_ctl(card, SC_CARDCTL_GET_SERIALNR, &serial);
+	if (r != SC_SUCCESS)
+		return SC_ERROR_INTERNAL;
 	r = sc_bin_to_hex(serial.value, serial.len, buf, sizeof(buf), 0);
 	if (r != SC_SUCCESS)
 		return SC_ERROR_INTERNAL;
@@ -75,6 +79,7 @@ static int sc_pkcs15emu_entersafe_init( sc_pkcs15_card_t *p15card)
 }
 
 int sc_pkcs15emu_entersafe_init_ex(sc_pkcs15_card_t *p15card,
+				   struct sc_aid *aid,
 				  sc_pkcs15emu_opt_t *opts)
 {
 	SC_FUNC_CALLED(p15card->card->ctx, SC_LOG_DEBUG_VERBOSE);

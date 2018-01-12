@@ -23,7 +23,8 @@ static int dump_objects(const char *what, int type)
 	printf("\nEnumerating %s... ", what);
 	fflush(stdout);
 
-	sc_lock(card);
+	if (SC_SUCCESS != sc_lock(card))
+		return 1;
 	count = sc_pkcs15_get_objects(p15card, type, NULL, 0);
 	if (count < 0) {
 		printf("failed.\n");
@@ -34,7 +35,8 @@ static int dump_objects(const char *what, int type)
 	}
 	if (count == 0) {
 		printf("none found.\n");
-		sc_unlock(card);
+		if (SC_SUCCESS != sc_unlock(card))
+			return 1;
 		return 0;
 	}
 	printf("%u found.\n", count);
@@ -48,7 +50,8 @@ static int dump_objects(const char *what, int type)
 			sc_test_print_object(objs[i]);
 	}
 	free(objs);
-	sc_unlock(card);
+	if (SC_SUCCESS != sc_unlock(card))
+		return 1;
 	return (count < 0) ? 1 : 0;
 }
 
@@ -62,9 +65,12 @@ static int dump_unusedspace(void)
 
 	if (p15card->file_unusedspace != NULL)
 		path = p15card->file_unusedspace->path;
-	else {
+	else if (p15card->file_app != NULL) {
 		path = p15card->file_app->path;
 		sc_append_path_id(&path, (const u8 *) "\x50\x33", 2);
+	} else {
+		printf("\nCan't find unused space file.\n");
+		return -1;
 	}
 	path.count = -1;
 
@@ -111,7 +117,8 @@ int main(int argc, char *argv[])
 		return 1;
 	printf("Looking for a PKCS#15 compatible Smart Card... ");
 	fflush(stdout);
-	sc_lock(card);
+	if (SC_SUCCESS != sc_lock(card))
+		return 1;
 	i = sc_pkcs15_bind(card, NULL, &p15card);
 	/* Keep card locked to prevent useless calls to sc_logout */
 	if (i) {
@@ -129,7 +136,8 @@ int main(int argc, char *argv[])
 	dump_unusedspace();
 
 	sc_pkcs15_unbind(p15card);
-	sc_unlock(card);
+	if (SC_SUCCESS != sc_unlock(card))
+		return 1;
 	sc_test_cleanup();
 	return 0;
 }

@@ -71,7 +71,7 @@ static struct sc_card_driver iasecc_drv = {
 
 static struct sc_atr_table iasecc_known_atrs[] = {
 	{ "3B:7F:96:00:00:00:31:B8:64:40:70:14:10:73:94:01:80:82:90:00",
-	  "FF:FF:FF:FF:FF:FF:FF:FE:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF",
+	  "FF:FF:FF:FF:FF:FF:FF:FE:FF:FF:00:00:FF:FF:FF:FF:FF:FF:FF:FF",
 		"IAS/ECC Gemalto", SC_CARD_TYPE_IASECC_GEMALTO,  0, NULL },
         { "3B:DD:18:00:81:31:FE:45:80:F9:A0:00:00:00:77:01:08:00:07:90:00:FE", NULL,
 		"IAS/ECC v1.0.1 Oberthur", SC_CARD_TYPE_IASECC_OBERTHUR,  0, NULL },
@@ -79,6 +79,8 @@ static struct sc_atr_table iasecc_known_atrs[] = {
 		"IAS/ECC v1.0.1 Sagem MDW-IAS-CARD2", SC_CARD_TYPE_IASECC_SAGEM,  0, NULL },
 	{ "3B:7F:18:00:00:00:31:B8:64:50:23:EC:C1:73:94:01:80:82:90:00", NULL,
 		"IAS/ECC v1.0.1 Sagem ypsID S3", SC_CARD_TYPE_IASECC_SAGEM,  0, NULL },
+	{ "3B:DF:96:00:80:31:FE:45:00:31:B8:64:04:1F:EC:C1:73:94:01:80:82:90:00:EC", NULL,
+		"IAS/ECC Morpho MinInt - Agent Card", SC_CARD_TYPE_IASECC_MI, 0, NULL },
 	{ "3B:DF:18:FF:81:91:FE:1F:C3:00:31:B8:64:0C:01:EC:C1:73:94:01:80:82:90:00:B3", NULL,
 		"IAS/ECC v1.0.1 Amos", SC_CARD_TYPE_IASECC_AMOS, 0, NULL },
 	{ "3B:DC:18:FF:81:91:FE:1F:C3:80:73:C8:21:13:66:02:04:03:55:00:02:34", NULL,
@@ -96,6 +98,10 @@ static struct sc_aid GlobalPlatform_ISD_Default_RID = {
 };
 static struct sc_aid OberthurIASECC_AID = {
 	{0xA0,0x00,0x00,0x00,0x77,0x01,0x08,0x00,0x07,0x00,0x00,0xFE,0x00,0x00,0x01,0x00}, 16
+};
+
+static struct sc_aid MIIASECC_AID = {
+	{ 0x4D, 0x49, 0x4F, 0x4D, 0x43, 0x54}, 6
 };
 
 struct iasecc_pin_status  {
@@ -117,8 +123,10 @@ static int iasecc_pin_is_verified(struct sc_card *card, struct sc_pin_cmd_data *
 static int iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_reference *ctl_data);
 static int iasecc_sdo_put_data(struct sc_card *card, struct iasecc_sdo_update *update);
 
+#ifdef ENABLE_SM
 static int _iasecc_sm_read_binary(struct sc_card *card, unsigned int offs, unsigned char *buf, size_t count);
 static int _iasecc_sm_update_binary(struct sc_card *card, unsigned int offs, const unsigned char *buff, size_t count);
+#endif
 
 static int
 iasecc_chv_cache_verified(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd)
@@ -149,7 +157,7 @@ iasecc_chv_cache_verified(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd)
 	else
 		memset(pin_status->sha1, 0, SHA_DIGEST_LENGTH);
 
-	sc_log(ctx, "iasecc_chv_cache_verified() sha1(PIN): %s", sc_dump_hex(pin_status->sha1, SHA_DIGEST_LENGTH));
+	sc_log_hex(ctx, "iasecc_chv_cache_verified() sha1(PIN)", pin_status->sha1, SHA_DIGEST_LENGTH);
 
 	if (!current)   {
 		if (!checked_pins)   {
@@ -211,7 +219,7 @@ iasecc_chv_cache_is_verified(struct sc_card *card, struct sc_pin_cmd_data *pin_c
 		SHA1(pin_cmd->pin1.data, pin_cmd->pin1.len, data_sha1);
 	else
 		memset(data_sha1, 0, SHA_DIGEST_LENGTH);
-	sc_log(ctx, "data_sha1: %s", sc_dump_hex(data_sha1, SHA_DIGEST_LENGTH));
+	sc_log_hex(ctx, "data_sha1: %s", data_sha1, SHA_DIGEST_LENGTH);
 
 	for(current = checked_pins; current; current = current->next)
 		if (current->reference == pin_cmd->pin_reference)
@@ -256,6 +264,9 @@ iasecc_select_mf(struct sc_card *card, struct sc_file **file_out)
 		apdu.resplen = sizeof(apdu_resp);
 		apdu.resp = apdu_resp;
 
+		if (card->type == SC_CARD_TYPE_IASECC_MI2)
+			apdu.p2 = 0x04;
+
 		rv = sc_transmit_apdu(card, &apdu);
 		LOG_TEST_RET(card->ctx, rv, "APDU transmit failed");
 		rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
@@ -280,11 +291,11 @@ iasecc_select_mf(struct sc_card *card, struct sc_file **file_out)
 	mf_file->type = SC_FILE_TYPE_DF;
 	mf_file->path = path;
 
-	if (card->cache.valid && card->cache.current_df)
+	if (card->cache.valid)
 		 sc_file_free(card->cache.current_df);
 	card->cache.current_df = NULL;
 
-	if (card->cache.valid && card->cache.current_ef)
+	if (card->cache.valid)
 		sc_file_free(card->cache.current_ef);
 	card->cache.current_ef = NULL;
 
@@ -334,7 +345,6 @@ iasecc_match_card(struct sc_card *card)
 	struct sc_context *ctx = card->ctx;
 	int i;
 
-	sc_log(ctx, "iasecc_match_card(%s) called", sc_dump_hex(card->atr.value, card->atr.len));
 	i = _sc_match_atr(card, iasecc_known_atrs, &card->type);
 	if (i < 0)   {
 		sc_log(ctx, "card not matched");
@@ -386,7 +396,9 @@ static int iasecc_parse_ef_atr(struct sc_card *card)
 	if (card->max_send_size > 0xFF)
 		card->max_send_size -= 5;
 
-	sc_log(ctx, "EF.ATR: max send/recv sizes %X/%X", card->max_send_size, card->max_recv_size);
+	sc_log(ctx,
+	       "EF.ATR: max send/recv sizes %"SC_FORMAT_LEN_SIZE_T"X/%"SC_FORMAT_LEN_SIZE_T"X",
+	       card->max_send_size, card->max_recv_size);
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
@@ -412,7 +424,8 @@ iasecc_init_gemalto(struct sc_card *card)
 	card->caps |= SC_CARD_CAP_USE_FCI_AC;
 
 	sc_format_path("3F00", &path);
-	sc_select_file(card, &path, NULL);
+	rv = sc_select_file(card, &path, NULL);
+	/* Result ignored*/
 
 	rv = iasecc_parse_ef_atr(card);
 	sc_log(ctx, "rv %i", rv);
@@ -443,7 +456,7 @@ iasecc_oberthur_match(struct sc_card *card)
 	if (*hist != 0x80 || ((*(hist+1)&0xF0) != 0xF0))
 		LOG_FUNC_RETURN(ctx, SC_ERROR_OBJECT_NOT_FOUND);
 
-	sc_log(ctx, "AID in historical_bytes '%s'", sc_dump_hex(hist + 2, *(hist+1) & 0x0F));
+	sc_log_hex(ctx, "AID in historical_bytes", hist + 2, *(hist+1) & 0x0F);
 
 	if (memcmp(hist + 2, OberthurIASECC_AID.value, *(hist+1) & 0x0F))
 		LOG_FUNC_RETURN(ctx, SC_ERROR_RECORD_NOT_FOUND);
@@ -503,38 +516,33 @@ iasecc_init_oberthur(struct sc_card *card)
 
 
 static int
-iasecc_init_sagem(struct sc_card *card)
+iasecc_mi_match(struct sc_card *card)
 {
 	struct sc_context *ctx = card->ctx;
-	unsigned int flags;
+	unsigned char resp[0x100];
+	size_t resp_len;
 	int rv = 0;
 
 	LOG_FUNC_CALLED(ctx);
 
-	flags = IASECC_CARD_DEFAULT_FLAGS;
+	resp_len = sizeof(resp);
+	rv = iasecc_select_aid(card, &MIIASECC_AID, resp, &resp_len);
+	LOG_TEST_RET(ctx, rv, "IASECC: failed to select MI IAS/ECC applet");
 
-	_sc_card_add_rsa_alg(card, 1024, flags, 0x10001);
-	_sc_card_add_rsa_alg(card, 2048, flags, 0x10001);
+	if (!card->ef_atr)
+		card->ef_atr = calloc(1, sizeof(struct sc_ef_atr));
+	if (!card->ef_atr)
+		LOG_FUNC_RETURN(ctx, SC_ERROR_OUT_OF_MEMORY);
 
-	card->caps = SC_CARD_CAP_RNG;
-	card->caps |= SC_CARD_CAP_APDU_EXT;
-	card->caps |= SC_CARD_CAP_USE_FCI_AC;
-
-	rv = iasecc_parse_ef_atr(card);
-	if (rv == SC_ERROR_FILE_NOT_FOUND)   {
-		rv = iasecc_select_mf(card, NULL);
-		LOG_TEST_RET(ctx, rv, "MF selection error");
-
-		rv = iasecc_parse_ef_atr(card);
-	}
-	LOG_TEST_RET(ctx, rv, "IASECC: ATR parse failed");
+	memcpy(card->ef_atr->aid.value, MIIASECC_AID.value, MIIASECC_AID.len);
+	card->ef_atr->aid.len = MIIASECC_AID.len;
 
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
 
 
 static int
-iasecc_init_amos(struct sc_card *card)
+iasecc_init_amos_or_sagem(struct sc_card *card)
 {
 	struct sc_context *ctx = card->ctx;
 	unsigned int flags;
@@ -551,6 +559,14 @@ iasecc_init_amos(struct sc_card *card)
 	card->caps |= SC_CARD_CAP_APDU_EXT;
 	card->caps |= SC_CARD_CAP_USE_FCI_AC;
 
+	if (card->type == SC_CARD_TYPE_IASECC_MI)   {
+		rv = iasecc_mi_match(card);
+		if (rv)
+			card->type = SC_CARD_TYPE_IASECC_MI2;
+		else
+			LOG_FUNC_RETURN(ctx, SC_SUCCESS);
+	}
+
 	rv = iasecc_parse_ef_atr(card);
 	if (rv == SC_ERROR_FILE_NOT_FOUND)   {
 		rv = iasecc_select_mf(card, NULL);
@@ -558,10 +574,11 @@ iasecc_init_amos(struct sc_card *card)
 
 		rv = iasecc_parse_ef_atr(card);
 	}
-
 	LOG_TEST_RET(ctx, rv, "IASECC: ATR parse failed");
+
 	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
+
 
 static int
 iasecc_init(struct sc_card *card)
@@ -583,9 +600,11 @@ iasecc_init(struct sc_card *card)
 	else if (card->type == SC_CARD_TYPE_IASECC_OBERTHUR)
 		rv = iasecc_init_oberthur(card);
 	else if (card->type == SC_CARD_TYPE_IASECC_SAGEM)
-		rv = iasecc_init_sagem(card);
+		rv = iasecc_init_amos_or_sagem(card);
 	else if (card->type == SC_CARD_TYPE_IASECC_AMOS)
-		rv = iasecc_init_amos(card);
+		rv = iasecc_init_amos_or_sagem(card);
+	else if (card->type == SC_CARD_TYPE_IASECC_MI)
+		rv = iasecc_init_amos_or_sagem(card);
 	else
 		LOG_FUNC_RETURN(ctx, SC_ERROR_NO_CARD_SUPPORT);
 
@@ -627,7 +646,9 @@ iasecc_read_binary(struct sc_card *card, unsigned int offs,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_read_binary(card:%p) offs %i; count %i", card, offs, count);
+	sc_log(ctx,
+	       "iasecc_read_binary(card:%p) offs %i; count %"SC_FORMAT_LEN_SIZE_T"u",
+	       card, offs, count);
 	if (offs > 0x7fff) {
 		sc_log(ctx, "invalid EF offset: 0x%X > 0x7FFF", offs);
 		return SC_ERROR_OFFSET_TOO_LARGE;
@@ -642,7 +663,9 @@ iasecc_read_binary(struct sc_card *card, unsigned int offs,
 	LOG_TEST_RET(ctx, rv, "APDU transmit failed");
 	rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	LOG_TEST_RET(ctx, rv, "iasecc_read_binary() failed");
-	sc_log(ctx, "iasecc_read_binary() apdu.resplen %i", apdu.resplen);
+	sc_log(ctx,
+	       "iasecc_read_binary() apdu.resplen %"SC_FORMAT_LEN_SIZE_T"u",
+	       apdu.resplen);
 
 	if (apdu.resplen == IASECC_READ_BINARY_LENGTH_MAX && apdu.resplen < count)   {
 		rv = iasecc_read_binary(card, offs + apdu.resplen, buf + apdu.resplen, count - apdu.resplen, flags);
@@ -664,7 +687,9 @@ iasecc_erase_binary(struct sc_card *card, unsigned int offs, size_t count, unsig
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_erase_binary(card:%p) count %i", card, count);
+	sc_log(ctx,
+	       "iasecc_erase_binary(card:%p) count %"SC_FORMAT_LEN_SIZE_T"u",
+	       card, count);
 	if (!count)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "'ERASE BINARY' failed: invalid size to erase");
 
@@ -680,6 +705,7 @@ iasecc_erase_binary(struct sc_card *card, unsigned int offs, size_t count, unsig
 }
 
 
+#if ENABLE_SM
 static int
 _iasecc_sm_read_binary(struct sc_card *card, unsigned int offs,
 		unsigned char *buff, size_t count)
@@ -689,7 +715,9 @@ _iasecc_sm_read_binary(struct sc_card *card, unsigned int offs,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_sm_read_binary() card:%p offs:%i count:%i ", card, offs, count);
+	sc_log(ctx,
+	       "iasecc_sm_read_binary() card:%p offs:%i count:%"SC_FORMAT_LEN_SIZE_T"u ",
+	       card, offs, count);
 	if (offs > 0x7fff)
 		LOG_TEST_RET(ctx, SC_ERROR_OFFSET_TOO_LARGE, "Invalid arguments");
 
@@ -728,7 +756,9 @@ _iasecc_sm_update_binary(struct sc_card *card, unsigned int offs,
 		return SC_SUCCESS;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_sm_read_binary() card:%p offs:%i count:%i ", card, offs, count);
+	sc_log(ctx,
+	       "iasecc_sm_read_binary() card:%p offs:%i count:%"SC_FORMAT_LEN_SIZE_T"u ",
+	       card, offs, count);
 	sc_print_cache(card);
 
 	if (card->cache.valid && card->cache.current_ef)   {
@@ -747,6 +777,7 @@ _iasecc_sm_update_binary(struct sc_card *card, unsigned int offs,
 
 	LOG_FUNC_RETURN(ctx, 0);
 }
+#endif
 
 
 static int
@@ -796,8 +827,9 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 	if (file_out)
 		*file_out = NULL;
 
-	sc_log(ctx, "iasecc_select_file(card:%p) path.len %i; path.type %i; aid_len %i",
-			card, path->len, path->type, path->aid.len);
+	sc_log(ctx,
+	       "iasecc_select_file(card:%p) path.len %"SC_FORMAT_LEN_SIZE_T"u; path.type %i; aid_len %"SC_FORMAT_LEN_SIZE_T"u",
+	       card, path->len, path->type, path->aid.len);
 	sc_log(ctx, "iasecc_select_file() path:%s", sc_print_path(path));
 
 	sc_print_cache(card);
@@ -808,7 +840,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 		LOG_TEST_RET(ctx, rv, "MF selection error");
 
 		if (lpath.len >= 2 && lpath.value[0] == 0x3F && lpath.value[1] == 0x00)	   {
-			memcpy(&lpath.value[0], &lpath.value[2], lpath.len - 2);
+			memmove(&lpath.value[0], &lpath.value[2], lpath.len - 2);
 			lpath.len -=  2;
 		}
 	}
@@ -817,7 +849,9 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 		struct sc_file *file = NULL;
 		struct sc_path ppath;
 
-		sc_log(ctx, "iasecc_select_file() select parent AID:%p/%i", lpath.aid.value, lpath.aid.len);
+		sc_log(ctx,
+		       "iasecc_select_file() select parent AID:%p/%"SC_FORMAT_LEN_SIZE_T"u",
+		       lpath.aid.value, lpath.aid.len);
 		sc_log(ctx, "iasecc_select_file() select parent AID:%s", sc_dump_hex(lpath.aid.value, lpath.aid.len));
 		memset(&ppath, 0, sizeof(ppath));
 		memcpy(ppath.value, lpath.aid.value, lpath.aid.len);
@@ -834,7 +868,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 
 		if (file_out)
 			*file_out = file;
-		else if (file)
+		else
 		   sc_file_free(file);
 
 		if (lpath.type == SC_PATH_TYPE_DF_NAME)
@@ -854,8 +888,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			&& !memcmp(card->cache.current_df->path.value, lpath.value, lpath.len))   {
 		sc_log(ctx, "returns current DF path %s", sc_print_path(&card->cache.current_df->path));
 		if (file_out)   {
-			if (*file_out)
-				sc_file_free(*file_out);
+			sc_file_free(*file_out);
 			sc_file_dup(file_out, card->cache.current_df);
 		}
 
@@ -874,7 +907,9 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 		if (card->type != SC_CARD_TYPE_IASECC_GEMALTO
 				&& card->type != SC_CARD_TYPE_IASECC_OBERTHUR
 				&& card->type != SC_CARD_TYPE_IASECC_SAGEM
-				&& card->type != SC_CARD_TYPE_IASECC_AMOS)
+				&& card->type != SC_CARD_TYPE_IASECC_AMOS
+				&& card->type != SC_CARD_TYPE_IASECC_MI
+				&& card->type != SC_CARD_TYPE_IASECC_MI2)
 			LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Unsupported card");
 
 		if (lpath.type == SC_PATH_TYPE_FILE_ID)   {
@@ -885,12 +920,20 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			}
 			if (card->type == SC_CARD_TYPE_IASECC_AMOS)
 				apdu.p2 = 0x04;
+			if (card->type == SC_CARD_TYPE_IASECC_MI)
+				apdu.p2 = 0x04;
+			if (card->type == SC_CARD_TYPE_IASECC_MI2)
+				apdu.p2 = 0x04;
 		}
 		else if (lpath.type == SC_PATH_TYPE_FROM_CURRENT)  {
 			apdu.p1 = 0x09;
 			if (card->type == SC_CARD_TYPE_IASECC_OBERTHUR)
 				apdu.p2 = 0x04;
 			if (card->type == SC_CARD_TYPE_IASECC_AMOS)
+				apdu.p2 = 0x04;
+			if (card->type == SC_CARD_TYPE_IASECC_MI)
+				apdu.p2 = 0x04;
+			if (card->type == SC_CARD_TYPE_IASECC_MI2)
 				apdu.p2 = 0x04;
 		}
 		else if (lpath.type == SC_PATH_TYPE_PARENT)   {
@@ -901,6 +944,8 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 		else if (lpath.type == SC_PATH_TYPE_DF_NAME)   {
 			apdu.p1 = 0x04;
 			if (card->type == SC_CARD_TYPE_IASECC_AMOS)
+				apdu.p2 = 0x04;
+			if (card->type == SC_CARD_TYPE_IASECC_MI2)
 				apdu.p2 = 0x04;
 		}
 		else   {
@@ -944,7 +989,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 		if (rv == SC_ERROR_FILE_NOT_FOUND && cache_valid && df_from_cache)   {
 			card->cache.valid = 0;
 			sc_log(ctx, "iasecc_select_file() file not found, retry without cached DF");
-			if (file_out && *file_out)   {
+			if (file_out)   {
 				sc_file_free(*file_out);
 				*file_out = NULL;
 			}
@@ -954,7 +999,9 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 
 		LOG_TEST_RET(ctx, rv, "iasecc_select_file() check SW failed");
 
-		sc_log(ctx, "iasecc_select_file() apdu.resp %i", apdu.resplen);
+		sc_log(ctx,
+		       "iasecc_select_file() apdu.resp %"SC_FORMAT_LEN_SIZE_T"u",
+		       apdu.resplen);
 		if (apdu.resplen)   {
 			sc_log(ctx, "apdu.resp %02X:%02X:%02X...", apdu.resp[0], apdu.resp[1], apdu.resp[2]);
 
@@ -976,12 +1023,12 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 
 			sc_log(ctx, "FileType %i", file->type);
 			if (file->type == SC_FILE_TYPE_DF)   {
-				if (card->cache.valid && card->cache.current_df)
+				if (card->cache.valid)
 					sc_file_free(card->cache.current_df);
 				card->cache.current_df = NULL;
 
 
-				if (card->cache.valid && card->cache.current_ef)
+				if (card->cache.valid)
 					sc_file_free(card->cache.current_ef);
 				card->cache.current_ef = NULL;
 
@@ -989,7 +1036,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 				card->cache.valid = 1;
 			}
 			else   {
-				if (card->cache.valid && card->cache.current_ef)
+				if (card->cache.valid)
 					sc_file_free(card->cache.current_ef);
 
 				card->cache.current_ef = NULL;
@@ -998,8 +1045,7 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			}
 
 			if (file_out)   {
-				if (*file_out)
-					sc_file_free(*file_out);
+				sc_file_free(*file_out);
 				*file_out = file;
 			}
 			else   {
@@ -1007,12 +1053,10 @@ iasecc_select_file(struct sc_card *card, const struct sc_path *path,
 			}
 		}
 		else if (lpath.type == SC_PATH_TYPE_DF_NAME)   {
-			if (card->cache.current_df)
-				sc_file_free(card->cache.current_df);
+			sc_file_free(card->cache.current_df);
 			card->cache.current_df = NULL;
 
-			if (card->cache.current_ef)
-				sc_file_free(card->cache.current_ef);
+			sc_file_free(card->cache.current_ef);
 			card->cache.current_ef = NULL;
 
 			card->cache.valid = 1;
@@ -1045,7 +1089,7 @@ iasecc_process_fci(struct sc_card *card, struct sc_file *file,
 	tag = sc_asn1_find_tag(ctx,  buf, buflen, 0x6F, &taglen);
 	sc_log(ctx, "processing FCI: 0x6F tag %p", tag);
 	if (tag != NULL) {
-		sc_log(ctx, "  FCP length %i", taglen);
+		sc_log(ctx, "  FCP length %"SC_FORMAT_LEN_SIZE_T"u", taglen);
 		buf = tag;
 		buflen = taglen;
 	}
@@ -1053,7 +1097,7 @@ iasecc_process_fci(struct sc_card *card, struct sc_file *file,
 	tag = sc_asn1_find_tag(ctx,  buf, buflen, 0x62, &taglen);
 	sc_log(ctx, "processing FCI: 0x62 tag %p", tag);
 	if (tag != NULL) {
-		sc_log(ctx, "  FCP length %i", taglen);
+		sc_log(ctx, "  FCP length %"SC_FORMAT_LEN_SIZE_T"u", taglen);
 		buf = tag;
 		buflen = taglen;
 	}
@@ -1074,11 +1118,14 @@ iasecc_process_fci(struct sc_card *card, struct sc_file *file,
 		acls = sc_asn1_find_tag(ctx, buf, buflen, IASECC_DOCP_TAG_ACLS_CONTACT, &taglen);
 
 	if (!acls)   {
-		sc_log(ctx, "ACLs not found in data(%i) %s", buflen, sc_dump_hex(buf, buflen));
+		sc_log(ctx,
+		       "ACLs not found in data(%"SC_FORMAT_LEN_SIZE_T"u) %s",
+		       buflen, sc_dump_hex(buf, buflen));
 		LOG_TEST_RET(ctx, SC_ERROR_OBJECT_NOT_FOUND, "ACLs tag missing");
 	}
 
-	sc_log(ctx, "ACLs(%i) '%s'", taglen, sc_dump_hex(acls, taglen));
+	sc_log(ctx, "ACLs(%"SC_FORMAT_LEN_SIZE_T"u) '%s'", taglen,
+	       sc_dump_hex(acls, taglen));
 	mask = 0x40, offs = 1;
 	for (ii = 0; ii < 7; ii++, mask /= 2)  {
 		unsigned char op = file->type == SC_FILE_TYPE_DF ? ops_DF[ii] : ops_EF[ii];
@@ -1177,7 +1224,9 @@ iasecc_fcp_encode(struct sc_card *card, struct sc_file *file, unsigned char *out
 			LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Non supported AC method");
 
 		amb |= mask;
-		sc_log(ctx, "%i: AMB %X; nn_smb %i", ii, amb, nn_smb);
+		sc_log(ctx,
+		       "%"SC_FORMAT_LEN_SIZE_T"u: AMB %"SC_FORMAT_LEN_SIZE_T"X; nn_smb %"SC_FORMAT_LEN_SIZE_T"u",
+		       ii, amb, nn_smb);
 	}
 
 	/* TODO: Encode contactless ACLs and life cycle status for all IAS/ECC cards */
@@ -1322,8 +1371,7 @@ iasecc_finish(struct sc_card *card)
 	LOG_FUNC_CALLED(ctx);
 
 	while (se_info)   {
-		if (se_info->df)
-			sc_file_free(se_info->df);
+		sc_file_free(se_info->df);
 		next = se_info->next;
 		free(se_info);
 		se_info = next;
@@ -1370,7 +1418,7 @@ iasecc_delete_file(struct sc_card *card, const struct sc_path *path)
 		rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
 		LOG_TEST_RET(ctx, rv, "Delete file failed");
 
-		if (card->cache.valid && card->cache.current_ef)
+		if (card->cache.valid)
 			sc_file_free(card->cache.current_ef);
 		card->cache.current_ef = NULL;
 	}
@@ -1435,12 +1483,18 @@ iasecc_se_cache_info(struct sc_card *card, struct iasecc_se_info *se)
 
 	if (card->cache.valid && card->cache.current_df)   {
 		sc_file_dup(&se_info->df, card->cache.current_df);
-		if (se_info->df == NULL)
+		if (se_info->df == NULL)   {
+			free(se_info);
 			LOG_TEST_RET(ctx, SC_ERROR_OUT_OF_MEMORY, "Cannot duplicate current DF file");
+		}
 	}
 
 	rv = iasecc_docp_copy(ctx, &se->docp, &se_info->docp);
-	LOG_TEST_RET(ctx, rv, "Cannot make copy of DOCP");
+	if (rv < 0)   {
+		free(se_info->df);
+		free(se_info);
+		LOG_TEST_RET(ctx, rv, "Cannot make copy of DOCP");
+	}
 
 	if (!prv->se_info)   {
 		prv->se_info = se_info;
@@ -1583,7 +1637,7 @@ iasecc_set_security_env(struct sc_card *card,
 
 	/* To made by iasecc_sdo_convert_to_file() */
 	prv->key_size = *(sdo.docp.size.value + 0) * 0x100 + *(sdo.docp.size.value + 1);
-	sc_log(ctx, "prv->key_size 0x%X", prv->key_size);
+	sc_log(ctx, "prv->key_size 0x%"SC_FORMAT_LEN_SIZE_T"X", prv->key_size);
 
 	rv = iasecc_sdo_convert_acl(card, &sdo, SC_AC_OP_PSO_COMPUTE_SIGNATURE, &sign_meth, &sign_ref);
 	LOG_TEST_RET(ctx, rv, "Cannot convert SC_AC_OP_SIGN acl");
@@ -1619,8 +1673,10 @@ iasecc_set_security_env(struct sc_card *card,
 	}
 
 	sc_log(ctx, "senv.algorithm 0x%X, senv.algorithm_ref 0x%X", env->algorithm, env->algorithm_ref);
-	sc_log(ctx, "se_num %i, operation 0x%X, algorithm 0x%X, algorithm_ref 0x%X, flags 0x%X; key size %i",
-					se_num, operation, env->algorithm, env->algorithm_ref, env->algorithm_flags, prv->key_size);
+	sc_log(ctx,
+	       "se_num %i, operation 0x%X, algorithm 0x%X, algorithm_ref 0x%X, flags 0x%X; key size %"SC_FORMAT_LEN_SIZE_T"u",
+	       se_num, operation, env->algorithm, env->algorithm_ref,
+	       env->algorithm_flags, prv->key_size);
 	switch (operation)  {
 	case SC_SEC_OPERATION_SIGN:
 		if (!(env->algorithm_flags & SC_ALGORITHM_RSA_PAD_PKCS1))
@@ -1736,13 +1792,14 @@ iasecc_chv_verify_pinpad(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd, 
 		LOG_FUNC_RETURN(ctx, SC_ERROR_READER);
 	}
 
-	if (pin_cmd->pin1.min_length != pin_cmd->pin1.max_length)   {
-		sc_log(ctx, "Different values for PIN min and max lengths is not actually compatible with PinPAD.");
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED,
-				"Different values for PIN min and max lengths is not actually compatible with PinPAD.");
-	}
-
-	pin_cmd->pin1.len = pin_cmd->pin1.min_length;
+	/* When PIN stored length available
+	 *     P10 verify data contains full template of 'VERIFY PIN' APDU.
+	 * Without PIN stored length
+	 *     pin-pad has to set the Lc and fill PIN data itself.
+	 *     Not all pin-pads support this case
+	 */
+	pin_cmd->pin1.len = pin_cmd->pin1.stored_length;
+	pin_cmd->pin1.length_offset = 5;
 
 	memset(buffer, 0xFF, sizeof(buffer));
 	pin_cmd->pin1.data = buffer;
@@ -1843,8 +1900,7 @@ iasecc_se_at_to_chv_reference(struct sc_card *card, unsigned reference,
 	if (chv_reference)
 		*chv_reference = crt.refs[0];
 
-	if (se.df)
-		sc_file_free(se.df);
+	sc_file_free(se.df);
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -1888,7 +1944,9 @@ iasecc_pin_verify(struct sc_card *card, unsigned type, unsigned reference,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "Verify PIN(type:%X,ref:%i,data(len:%i,%p)", type, reference, data_len, data);
+	sc_log(ctx,
+	       "Verify PIN(type:%X,ref:%i,data(len:%"SC_FORMAT_LEN_SIZE_T"u,%p)",
+	       type, reference, data_len, data);
 
 	if (type == SC_AC_AUT)   {
 		rv =  iasecc_sm_external_authentication(card, reference, tries_left);
@@ -1972,25 +2030,35 @@ iasecc_chv_change_pinpad(struct sc_card *card, unsigned reference, int *tries_le
 	rv = iasecc_pin_get_policy(card, &pin_cmd);
 	LOG_TEST_RET(ctx, rv, "Get 'PIN policy' error");
 
-	if (pin_cmd.pin1.min_length != pin_cmd.pin1.max_length)
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Different values for PIN min and max lengths is not allowed with PinPAD.");
+	/* Some pin-pads do not support mode with Lc=0.
+	 * Give them a chance to work with some cards.
+	 */
+	if ((pin_cmd.pin1.min_length == pin_cmd.pin1.stored_length) && (pin_cmd.pin1.max_length == pin_cmd.pin1.min_length))
+		pin_cmd.pin1.len = pin_cmd.pin1.stored_length;
+	else
+		pin_cmd.pin1.len = 0;
 
-	if (pin_cmd.pin1.min_length < 4)
-		pin_cmd.pin1.min_length = 4;
-	pin_cmd.pin1.len = pin_cmd.pin1.min_length;
+	pin_cmd.pin1.length_offset = 5;
 	pin_cmd.pin1.data = pin1_data;
 
 	memcpy(&pin_cmd.pin2, &pin_cmd.pin1, sizeof(pin_cmd.pin1));
 	pin_cmd.pin2.data = pin2_data;
 
-	sc_log(ctx, "PIN1 max/min: %i/%i", pin_cmd.pin1.max_length, pin_cmd.pin1.min_length);
-	sc_log(ctx, "PIN2 max/min: %i/%i", pin_cmd.pin2.max_length, pin_cmd.pin2.min_length);
+	sc_log(ctx,
+	       "PIN1 max/min/stored: %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
+	       pin_cmd.pin1.max_length, pin_cmd.pin1.min_length,
+	       pin_cmd.pin1.stored_length);
+	sc_log(ctx,
+	       "PIN2 max/min/stored: %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
+	       pin_cmd.pin2.max_length, pin_cmd.pin2.min_length,
+	       pin_cmd.pin2.stored_length);
 	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
 
 
+#if 0
 static int
 iasecc_chv_set_pinpad(struct sc_card *card, unsigned char reference)
 {
@@ -2018,16 +2086,17 @@ iasecc_chv_set_pinpad(struct sc_card *card, unsigned char reference)
 	rv = iasecc_pin_get_policy(card, &pin_cmd);
 	LOG_TEST_RET(ctx, rv, "Get 'PIN policy' error");
 
-	if (pin_cmd.pin1.min_length != pin_cmd.pin1.max_length)
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Different values for PIN min and max lengths is not allowed with PinPAD.");
+	if ((pin_cmd.pin1.min_length == pin_cmd.pin1.stored_length) && (pin_cmd.pin1.max_length == pin_cmd.pin1.min_length))
+		pin_cmd.pin1.len = pin_cmd.pin1.stored_length;
+	else
+		pin_cmd.pin1.len = 0;
 
-	if (pin_cmd.pin1.min_length < 4)
-		pin_cmd.pin1.min_length = 4;
-	pin_cmd.pin1.len = pin_cmd.pin1.min_length;
+	pin_cmd.pin1.length_offset = 5;
 	pin_cmd.pin1.data = pin_data;
 
 	memcpy(&pin_cmd.pin2, &pin_cmd.pin1, sizeof(pin_cmd.pin1));
 	memset(&pin_cmd.pin1, 0, sizeof(pin_cmd.pin1));
+	pin_cmd.flags |= SC_PIN_CMD_IMPLICIT_CHANGE;
 
 	sc_log(ctx, "PIN1(max:%i,min:%i)", pin_cmd.pin1.max_length, pin_cmd.pin1.min_length);
 	sc_log(ctx, "PIN2(max:%i,min:%i)", pin_cmd.pin2.max_length, pin_cmd.pin2.min_length);
@@ -2035,6 +2104,7 @@ iasecc_chv_set_pinpad(struct sc_card *card, unsigned char reference)
 	rv = iso_ops->pin_cmd(card, &pin_cmd, NULL);
 	LOG_FUNC_RETURN(ctx, rv);
 }
+#endif
 
 
 static int
@@ -2087,6 +2157,9 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	if (sdo.docp.acls_contact.size == 0)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_DATA, "Extremely strange ... there is no ACLs");
 
+	sc_log(ctx,
+	       "iasecc_pin_get_policy() sdo.docp.size.size %"SC_FORMAT_LEN_SIZE_T"u",
+	       sdo.docp.size.size);
 	for (ii=0; ii<sizeof(sdo.docp.scbs); ii++)   {
 		struct iasecc_se_info se;
 		unsigned char scb = sdo.docp.scbs[ii];
@@ -2131,8 +2204,7 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 			continue;
 		}
 
-		if (se.df)
-			sc_file_free(se.df);
+		sc_file_free(se.df);
 	}
 
 	if (sdo.data.chv.size_max.value)
@@ -2143,34 +2215,32 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 		data->pin1.max_tries = *sdo.docp.tries_maximum.value;
 	if (sdo.docp.tries_remaining.value)
 		data->pin1.tries_left = *sdo.docp.tries_remaining.value;
+	if (sdo.docp.size.value)   {
+		for (ii=0; ii<sdo.docp.size.size; ii++)
+			data->pin1.stored_length = ((data->pin1.stored_length) << 8) + *(sdo.docp.size.value + ii);
+	}
 
 	data->pin1.encoding = SC_PIN_ENCODING_ASCII;
 	data->pin1.offset = 5;
+	data->pin1.logged_in = SC_PIN_STATE_UNKNOWN;
 
-	sc_log(ctx, "PIN policy: size max/min %i/%i, tries max/left %i/%i",
-				data->pin1.max_length, data->pin1.min_length,
-				data->pin1.max_tries, data->pin1.tries_left);
+	sc_log(ctx,
+	       "PIN policy: size max/min %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u, tries max/left %i/%i",
+	       data->pin1.max_length, data->pin1.min_length,
+	       data->pin1.max_tries, data->pin1.tries_left);
 	iasecc_sdo_free_fields(card, &sdo);
 
 	if (save_current_df)   {
-		struct sc_file *dummy_file = NULL;
-
 		sc_log(ctx, "iasecc_pin_get_policy() restore current DF");
-		rv = iasecc_select_file(card, &save_current_df->path, &dummy_file);
+		rv = iasecc_select_file(card, &save_current_df->path, NULL);
 		LOG_TEST_RET(ctx, rv, "Cannot return to saved DF");
-
-		sc_file_free(dummy_file);
 		sc_file_free(save_current_df);
 	}
 
 	if (save_current_ef)   {
-		struct sc_file *dummy_file = NULL;
-
 		sc_log(ctx, "iasecc_pin_get_policy() restore current EF");
-		rv = iasecc_select_file(card, &save_current_ef->path, &dummy_file);
+		rv = iasecc_select_file(card, &save_current_ef->path, NULL);
 		LOG_TEST_RET(ctx, rv, "Cannot return to saved EF");
-
-		sc_file_free(dummy_file);
 		sc_file_free(save_current_ef);
 	}
 
@@ -2215,12 +2285,14 @@ iasecc_keyset_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tr
 
 	update.fields[0].parent_tag = IASECC_SDO_KEYSET_TAG;
 	update.fields[0].tag = IASECC_SDO_KEYSET_TAG_MAC;
-	update.fields[0].value = data->pin2.data;
+	/* FIXME is it safe to modify the const value here? */
+	update.fields[0].value = (unsigned char *) data->pin2.data;
 	update.fields[0].size = 16;
 
 	update.fields[1].parent_tag = IASECC_SDO_KEYSET_TAG;
 	update.fields[1].tag = IASECC_SDO_KEYSET_TAG_ENC;
-	update.fields[1].value = data->pin2.data + 16;
+	/* FIXME is it safe to modify the const value here? */
+	update.fields[1].value = (unsigned char *) data->pin2.data + 16;
 	update.fields[1].size = 16;
 
 	rv = iasecc_sm_sdo_update(card, (scb & IASECC_SCB_METHOD_MASK_REF), &update);
@@ -2241,7 +2313,7 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	sc_log(ctx, "Change PIN(ref:%i,type:0x%X,lengths:%i/%i)", reference, data->pin_type, data->pin1.len, data->pin2.len);
 
 	if ((card->reader->capabilities & SC_READER_CAP_PIN_PAD))   {
-		if (!data->pin1.data && !data->pin1.len && &data->pin2.data && !data->pin2.len)   {
+		if (!data->pin1.data && !data->pin1.len && !data->pin2.data && !data->pin2.len)   {
 			rv = iasecc_chv_change_pinpad(card, reference, tries_left);
 			sc_log(ctx, "iasecc_pin_cmd(SC_PIN_CMD_CHANGE) chv_change_pinpad returned %i", rv);
 			LOG_FUNC_RETURN(ctx, rv);
@@ -2327,6 +2399,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		unsigned char se_num = scb & IASECC_SCB_METHOD_MASK_REF;
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
+			sc_log(ctx, "Verify PIN in SE %X", se_num);
 			rv = iasecc_pin_verify(card, SC_AC_SEN, se_num, data->pin1.data, data->pin1.len, tries_left);
 			LOG_TEST_RET(ctx, rv, "iasecc_pin_reset() verify PUK error");
 
@@ -2337,9 +2410,6 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		if (scb & IASECC_SCB_METHOD_SM)   {
 			rv = iasecc_sm_pin_reset(card, se_num, data);
 			LOG_FUNC_RETURN(ctx, rv);
-
-			if (!need_all)
-				break;
 		}
 
 		if (scb & IASECC_SCB_METHOD_EXT_AUTH)   {
@@ -2351,6 +2421,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 	iasecc_sdo_free_fields(card, &sdo);
 
 	if (data->pin2.len)   {
+		sc_log(ctx, "Reset PIN %X and set new value", reference);
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x2C, 0x02, reference);
 		apdu.data = data->pin2.data;
 		apdu.datalen = data->pin2.len;
@@ -2362,6 +2433,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		LOG_TEST_RET(ctx, rv, "PIN cmd failed");
 	}
 	else if (data->pin2.data) {
+		sc_log(ctx, "Reset PIN %X and set new value", reference);
 		sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0x2C, 3, reference);
 
 		rv = sc_transmit_apdu(card, &apdu);
@@ -2370,14 +2442,17 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		LOG_TEST_RET(ctx, rv, "PIN cmd failed");
 	}
 	else   {
+		sc_log(ctx, "Reset PIN %X and set new value with PIN-PAD", reference);
+#if 0
 		rv = iasecc_chv_set_pinpad(card, reference);
-		sc_log(ctx, "Set CHV with PIN pad returned %i", rv);
+		LOG_TEST_RET(ctx, rv, "Reset PIN failed");
+#else
+		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Reset retry counter with PIN PAD not supported ");
+#endif
 	}
 
 	if (save_current)   {
-		struct sc_file *dummy_file = NULL;
-
-		rv = iasecc_select_file(card, &save_current->path, &dummy_file);
+		rv = iasecc_select_file(card, &save_current->path, NULL);
 		LOG_TEST_RET(ctx, rv, "Cannot return to saved PATH");
 	}
 
@@ -2389,7 +2464,6 @@ static int
 iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
 	struct sc_context *ctx = card->ctx;
-	struct sc_apdu apdu;
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
@@ -2400,28 +2474,23 @@ iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_le
 	switch (data->cmd)   {
 	case SC_PIN_CMD_VERIFY:
 		rv = iasecc_pin_verify(card, data->pin_type, data->pin_reference, data->pin1.data, data->pin1.len, tries_left);
-		LOG_FUNC_RETURN(ctx, rv);
+		break;
 	case SC_PIN_CMD_CHANGE:
 		if (data->pin_type == SC_AC_AUT)
 			rv = iasecc_keyset_change(card, data, tries_left);
 		else
 			rv = iasecc_pin_change(card, data, tries_left);
-		LOG_FUNC_RETURN(ctx, rv);
+		break;
 	case SC_PIN_CMD_UNBLOCK:
 		rv = iasecc_pin_reset(card, data, tries_left);
-		LOG_FUNC_RETURN(ctx, rv);
+		break;
 	case SC_PIN_CMD_GET_INFO:
 		rv = iasecc_pin_get_policy(card, data);
-		LOG_FUNC_RETURN(ctx, rv);
+		break;
 	default:
 		sc_log(ctx, "Other pin commands not supported yet: 0x%X", data->cmd);
-		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Non-supported PIN command");
+		rv = SC_ERROR_NOT_SUPPORTED;
 	}
-
-	rv = sc_transmit_apdu(card, &apdu);
-	LOG_TEST_RET(ctx, rv, "APDU transmit failed");
-	rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	LOG_TEST_RET(ctx, rv, "PIN cmd failed");
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -2559,7 +2628,8 @@ iasecc_sdo_create(struct sc_card *card, struct iasecc_sdo *sdo)
 		rv = iasecc_sdo_put_data(card, &update);
 		LOG_TEST_RET(ctx, rv, "failed to update 'Compulsory usage' data");
 
-		field->on_card = 1;
+		if (field)
+			field->on_card = 1;
 	}
 
 	free(data);
@@ -2900,8 +2970,7 @@ iasecc_get_chv_reference_from_se(struct sc_card *card, int *se_reference)
 	rv = iasecc_se_get_crt(card, &se, &crt);
 	LOG_TEST_RET(ctx, rv, "Cannot get 'USER PASSWORD' authentication template");
 
-	if (se.df)
-		sc_file_free(se.df);
+	sc_file_free(se.df);
 	LOG_FUNC_RETURN(ctx, crt.refs[0]);
 }
 
@@ -2960,7 +3029,9 @@ iasecc_decipher(struct sc_card *card,
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(card->ctx, "crgram_len %i;  outlen %i", in_len, out_len);
+	sc_log(card->ctx,
+	       "crgram_len %"SC_FORMAT_LEN_SIZE_T"u;  outlen %"SC_FORMAT_LEN_SIZE_T"u",
+	       in_len, out_len);
 	if (!out || !out_len || in_len > SC_MAX_APDU_BUFFER_SIZE)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
@@ -3009,7 +3080,9 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
 	if (!in || !in_len || !out)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "sc_pkcs15_get_qsign_data() input data length %i", in_len);
+	sc_log(ctx,
+	       "sc_pkcs15_get_qsign_data() input data length %"SC_FORMAT_LEN_SIZE_T"u",
+	       in_len);
 	memset(out, 0, sizeof(struct iasecc_qsign_data));
 
 	SHA1_Init(&sha);
@@ -3033,7 +3106,9 @@ iasecc_qsign_data_sha1(struct sc_context *ctx, const unsigned char *in, size_t i
 	if (sha.num)   {
 		memcpy(out->last_block, in + in_len - sha.num, sha.num);
 		out->last_block_size = sha.num;
-		sc_log(ctx, "Last block(%i):%s", out->last_block_size, sc_dump_hex(out->last_block, out->last_block_size));
+		sc_log(ctx, "Last block(%"SC_FORMAT_LEN_SIZE_T"u):%s",
+		       out->last_block_size,
+		       sc_dump_hex(out->last_block, out->last_block_size));
 	}
 
 	SHA1_Final(out->hash, &sha);
@@ -3058,7 +3133,9 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
 	if (!in || !in_len || !out)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 
-	sc_log(ctx, "sc_pkcs15_get_qsign_data() input data length %i", in_len);
+	sc_log(ctx,
+	       "sc_pkcs15_get_qsign_data() input data length %"SC_FORMAT_LEN_SIZE_T"u",
+	       in_len);
 	memset(out, 0, sizeof(struct iasecc_qsign_data));
 
 	SHA256_Init(&sha256);
@@ -3082,7 +3159,9 @@ iasecc_qsign_data_sha256(struct sc_context *ctx, const unsigned char *in, size_t
 	if (sha256.num)   {
 		memcpy(out->last_block, in + in_len - sha256.num, sha256.num);
 		out->last_block_size = sha256.num;
-		sc_log(ctx, "Last block(%i):%s", out->last_block_size, sc_dump_hex(out->last_block, out->last_block_size));
+		sc_log(ctx, "Last block(%"SC_FORMAT_LEN_SIZE_T"u):%s",
+		       out->last_block_size,
+		       sc_dump_hex(out->last_block, out->last_block_size));
 	}
 
 	SHA256_Final(out->hash, &sha256);
@@ -3106,10 +3185,12 @@ iasecc_compute_signature_dst(struct sc_card *card,
 	size_t offs = 0, hash_len = 0;
 	unsigned char sbuf[SC_MAX_APDU_BUFFER_SIZE];
 	unsigned char rbuf[SC_MAX_APDU_BUFFER_SIZE];
-	int rv;
+	int rv = SC_SUCCESS;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "iasecc_compute_signature_dst() input length %i", in_len);
+	sc_log(ctx,
+	       "iasecc_compute_signature_dst() input length %"SC_FORMAT_LEN_SIZE_T"u",
+	       in_len);
 	if (env->operation != SC_SEC_OPERATION_SIGN)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "It's not SC_SEC_OPERATION_SIGN");
 	else if (!(prv->key_size & 0x1E0) || (prv->key_size & ~0x1E0))
@@ -3130,7 +3211,9 @@ iasecc_compute_signature_dst(struct sc_card *card,
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Need RSA_HASH_SHA1 or RSA_HASH_SHA256 algorithm");
 	LOG_TEST_RET(ctx, rv, "Cannot get QSign data");
 
-	sc_log(ctx, "iasecc_compute_signature_dst() hash_len %i; key_size %i", hash_len, prv->key_size);
+	sc_log(ctx,
+	       "iasecc_compute_signature_dst() hash_len %"SC_FORMAT_LEN_SIZE_T"u; key_size %"SC_FORMAT_LEN_SIZE_T"u",
+	       hash_len, prv->key_size);
 
 	memset(sbuf, 0, sizeof(sbuf));
 	sbuf[offs++] = 0x90;
@@ -3150,7 +3233,9 @@ iasecc_compute_signature_dst(struct sc_card *card,
 	memcpy(sbuf + offs, qsign_data.last_block, qsign_data.last_block_size);
 	offs += qsign_data.last_block_size;
 
-	sc_log(ctx, "iasecc_compute_signature_dst() offs %i; OP(meth:%X,ref:%X)", offs, prv->op_method, prv->op_ref);
+	sc_log(ctx,
+	       "iasecc_compute_signature_dst() offs %"SC_FORMAT_LEN_SIZE_T"u; OP(meth:%X,ref:%X)",
+	       offs, prv->op_method, prv->op_ref);
 	if (prv->op_method == SC_AC_SCB && (prv->op_ref & IASECC_SCB_METHOD_SM))
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "Not yet");
 
@@ -3176,7 +3261,9 @@ iasecc_compute_signature_dst(struct sc_card *card,
 	rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
 	LOG_TEST_RET(ctx, rv, "Compute signature failed");
 
-	sc_log(ctx, "iasecc_compute_signature_dst() DST resplen %i", apdu.resplen);
+	sc_log(ctx,
+	       "iasecc_compute_signature_dst() DST resplen %"SC_FORMAT_LEN_SIZE_T"u",
+	       apdu.resplen);
 	if (apdu.resplen > out_len)
 		LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "Result buffer too small for the DST signature");
 
@@ -3246,14 +3333,21 @@ static int
 iasecc_compute_signature(struct sc_card *card,
 		const unsigned char *in, size_t in_len, unsigned char *out, size_t out_len)
 {
-	struct sc_context *ctx = card->ctx;
-	struct iasecc_private_data *prv = (struct iasecc_private_data *) card->drv_data;
-	struct sc_security_env *env = &prv->security_env;
+	struct sc_context *ctx;
+	struct iasecc_private_data *prv;
+	struct sc_security_env *env;
+
+	if (!card || !in || !out)
+		return SC_ERROR_INVALID_ARGUMENTS;
+
+	ctx = card->ctx;
+	prv = (struct iasecc_private_data *) card->drv_data;
+	env = &prv->security_env;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "inlen %i, outlen %i", in_len, out_len);
-	if (!card || !in || !out)
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid compute signature arguments");
+	sc_log(ctx,
+	       "inlen %"SC_FORMAT_LEN_SIZE_T"u, outlen %"SC_FORMAT_LEN_SIZE_T"u",
+	       in_len, out_len);
 
 	if (env->operation == SC_SEC_OPERATION_SIGN)
 		return iasecc_compute_signature_dst(card, in, in_len, out,  out_len);
@@ -3266,7 +3360,7 @@ iasecc_compute_signature(struct sc_card *card,
 
 static int
 iasecc_read_public_key(struct sc_card *card, unsigned type,
-		struct sc_path *key_path, unsigned ref, size_t size,
+		struct sc_path *key_path, unsigned ref, unsigned size,
 		unsigned char **out, size_t *out_len)
 {
 	struct sc_context *ctx = card->ctx;
@@ -3311,7 +3405,8 @@ iasecc_read_public_key(struct sc_card *card, unsigned type,
 	rv = sc_pkcs15_encode_pubkey_rsa(ctx, &rsa_key, out, out_len);
 	LOG_TEST_RET(ctx, rv, "failed to read public key: cannot encode RSA public key");
 
-	sc_log(ctx, "encoded public key: %s", sc_dump_hex(*out, *out_len));
+	if (out && out_len)
+		sc_log(ctx, "encoded public key: %s", sc_dump_hex(*out, *out_len));
 
 	if (bn[0].data)
 		free(bn[0].data);
@@ -3320,7 +3415,7 @@ iasecc_read_public_key(struct sc_card *card, unsigned type,
 
 	iasecc_sdo_free_fields(card, &sdo);
 
-	SC_FUNC_RETURN(ctx, SC_SUCCESS, rv);
+	LOG_FUNC_RETURN(ctx, SC_SUCCESS);
 }
 
 
@@ -3361,10 +3456,14 @@ iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_refer
 			LOG_TEST_RET(ctx, rv, "get new key reference failed");
 
 		sz = *(sdo->docp.size.value + 0) * 0x100 + *(sdo->docp.size.value + 1);
-		sc_log(ctx, "SDO(idx:%i) size %i; key_size %i", idx, sz, ctl_data->key_size);
+		sc_log(ctx,
+		       "SDO(idx:%i) size %"SC_FORMAT_LEN_SIZE_T"u; key_size %"SC_FORMAT_LEN_SIZE_T"u",
+		       idx, sz, ctl_data->key_size);
 
 		if (sz != ctl_data->key_size / 8)   {
-			sc_log(ctx, "key index %i ignored: different key sizes %i/%i", idx, sz, ctl_data->key_size / 8);
+			sc_log(ctx,
+			       "key index %i ignored: different key sizes %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
+			       idx, sz, ctl_data->key_size / 8);
 			continue;
 		}
 
@@ -3477,6 +3576,17 @@ struct sc_card_driver *
 sc_get_iasecc_driver(void)
 {
 	return sc_get_driver();
+}
+
+#else
+
+/* we need to define the functions below to export them */
+#include "errors.h"
+
+int
+iasecc_se_get_info()
+{
+	return SC_ERROR_NOT_SUPPORTED;
 }
 
 #endif /* ENABLE_OPENSSL */

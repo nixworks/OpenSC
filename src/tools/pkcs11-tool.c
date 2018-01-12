@@ -1,7 +1,7 @@
 /*
  * pkcs11-tool.c: Tool for poking around pkcs11 modules/tokens
  *
- * Copyright (C) 2002  Olaf Kirch <okir@lst.de>
+ * Copyright (C) 2002  Olaf Kirch <okir@suse.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,20 +20,34 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <errno.h>
 #include <stdlib.h>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#else
+#include <windows.h>
+#include <io.h>
+#endif
+
 #ifdef ENABLE_OPENSSL
 #include <openssl/opensslv.h>
+#include "libopensc/sc-ossl-compat.h"
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 #include <openssl/opensslconf.h>
+#include <openssl/crypto.h>
 #endif
 #if OPENSSL_VERSION_NUMBER >= 0x00907000L
 #include <openssl/conf.h>
 #endif
 #include <openssl/evp.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/asn1t.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 #if OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
@@ -47,7 +61,15 @@
 #include "pkcs11/pkcs11.h"
 #include "pkcs11/pkcs11-opensc.h"
 #include "libopensc/asn1.h"
+#include "common/compat_strlcat.h"
+#include "common/compat_strlcpy.h"
 #include "util.h"
+
+#ifdef _WIN32
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#endif
 
 extern void *C_LoadModule(const char *name, CK_FUNCTION_LIST_PTR_PTR);
 extern CK_RV C_UnloadModule(void *module);
@@ -62,18 +84,34 @@ static struct ec_curve_info {
 	size_t size;
 } ec_curve_infos[] = {
 	{"secp192r1",    "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
-	{"prime192r1",   "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
+	{"prime192v1",   "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
+	{"prime192v2",   "1.2.840.10045.3.1.2", "06082A8648CE3D030102", 192},
+	{"prime192v3",   "1.2.840.10045.3.1.3", "06082A8648CE3D030103", 192},
+	{"nistp192",     "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
 	{"ansiX9p192r1", "1.2.840.10045.3.1.1", "06082A8648CE3D030101", 192},
+
+	{"secp224r1", "1.3.132.0.33", "06052b81040021", 224},
+	{"nistp224",  "1.3.132.0.33", "06052b81040021", 224},
+
 	{"prime256v1",   "1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"secp256r1",    "1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
 	{"ansiX9p256r1", "1.2.840.10045.3.1.7", "06082A8648CE3D030107", 256},
+	{"frp256v1",	 "1.2.250.1.223.101.256.1", "060a2a817a01815f65820001", 256},
+
 	{"secp384r1",		"1.3.132.0.34", "06052B81040022", 384},
 	{"prime384v1",		"1.3.132.0.34", "06052B81040022", 384},
 	{"ansiX9p384r1",	"1.3.132.0.34", "06052B81040022", 384},
+
+	{"secp521r1", "1.3.132.0.35", "06052B81040023", 521},
+	{"nistp521",  "1.3.132.0.35", "06052B81040023", 521},
+
 	{"brainpoolP192r1", "1.3.36.3.3.2.8.1.1.3", "06092B2403030208010103", 192},
 	{"brainpoolP224r1", "1.3.36.3.3.2.8.1.1.5", "06092B2403030208010105", 224},
 	{"brainpoolP256r1", "1.3.36.3.3.2.8.1.1.7", "06092B2403030208010107", 256},
 	{"brainpoolP320r1", "1.3.36.3.3.2.8.1.1.9", "06092B2403030208010109", 320},
+
+	{"secp192k1",		"1.3.132.0.31", "06052B8104001F", 192},
+	{"secp256k1",		"1.3.132.0.10", "06052B8104000A", 256},
 	{NULL, NULL, NULL, 0},
 };
 
@@ -94,15 +132,24 @@ enum {
 	OPT_KEY_TYPE,
 	OPT_KEY_USAGE_SIGN,
 	OPT_KEY_USAGE_DECRYPT,
-	OPT_KEY_USAGE_NONREPUDIATION,
+	OPT_KEY_USAGE_DERIVE,
 	OPT_PRIVATE,
+	OPT_SENSITIVE,
 	OPT_TEST_HOTPLUG,
 	OPT_UNLOCK_PIN,
 	OPT_PUK,
 	OPT_NEW_PIN,
 	OPT_LOGIN_TYPE,
 	OPT_TEST_EC,
-	OPT_DERIVE
+	OPT_DERIVE,
+	OPT_DERIVE_PASS_DER,
+	OPT_DECRYPT,
+	OPT_TEST_FORK,
+	OPT_GENERATE_KEY,
+	OPT_GENERATE_RANDOM,
+	OPT_HASH_ALGORITHM,
+	OPT_MGF,
+	OPT_SALT,
 };
 
 static const struct option options[] = {
@@ -114,12 +161,17 @@ static const struct option options[] = {
 	{ "list-objects",	0, NULL,		'O' },
 
 	{ "sign",		0, NULL,		's' },
+	{ "decrypt",		0, NULL,		OPT_DECRYPT },
 	{ "hash",		0, NULL,		'h' },
 	{ "derive",		0, NULL,		OPT_DERIVE },
+	{ "derive-pass-der",	0, NULL,		OPT_DERIVE_PASS_DER },
 	{ "mechanism",		1, NULL,		'm' },
+	{ "hash-algorithm",	1, NULL,		OPT_HASH_ALGORITHM },
+	{ "mgf",		1, NULL,		OPT_MGF },
+	{ "salt-len",		1, NULL,		OPT_SALT },
 
 	{ "login",		0, NULL,		'l' },
-	{ "login-type",         1, NULL,                OPT_LOGIN_TYPE },
+	{ "login-type",		1, NULL,		OPT_LOGIN_TYPE },
 	{ "pin",		1, NULL,		'p' },
 	{ "puk",		1, NULL,		OPT_PUK },
 	{ "new-pin",		1, NULL,		OPT_NEW_PIN },
@@ -129,10 +181,11 @@ static const struct option options[] = {
 	{ "change-pin",		0, NULL,		'c' },
 	{ "unlock-pin",		0, NULL,		OPT_UNLOCK_PIN },
 	{ "keypairgen",		0, NULL,		'k' },
+	{ "keygen",		0, NULL,		OPT_GENERATE_KEY },
 	{ "key-type",		1, NULL,		OPT_KEY_TYPE },
 	{ "usage-sign",		0, NULL,		OPT_KEY_USAGE_SIGN },
 	{ "usage-decrypt",	0, NULL,		OPT_KEY_USAGE_DECRYPT },
-	{ "usage-nonrepudiation",0, NULL,		OPT_KEY_USAGE_NONREPUDIATION },
+	{ "usage-derive",	0, NULL,		OPT_KEY_USAGE_DERIVE },
 	{ "write-object",	1, NULL,		'w' },
 	{ "read-object",	0, NULL,		'r' },
 	{ "delete-object",	0, NULL,		'b' },
@@ -151,19 +204,25 @@ static const struct option options[] = {
 	{ "attr-from",		1, NULL,		OPT_ATTR_FROM },
 	{ "input-file",		1, NULL,		'i' },
 	{ "output-file",	1, NULL,		'o' },
+	{ "signature-format",	1, NULL,		'f' },
 
 	{ "test",		0, NULL,		't' },
 	{ "test-hotplug",	0, NULL,		OPT_TEST_HOTPLUG },
 	{ "moz-cert",		1, NULL,		'z' },
 	{ "verbose",		0, NULL,		'v' },
 	{ "private",		0, NULL,		OPT_PRIVATE },
+	{ "sensitive",		0, NULL,		OPT_SENSITIVE },
 	{ "test-ec",		0, NULL,		OPT_TEST_EC },
+#ifndef _WIN32
+	{ "test-fork",		0, NULL,		OPT_TEST_FORK },
+#endif
+	{ "generate-random",	1, NULL,		OPT_GENERATE_RANDOM },
 
 	{ NULL, 0, NULL, 0 }
 };
 
 static const char *option_help[] = {
-	"Specify the module to load (mandatory)",
+	"Specify the module to load (default:" DEFAULT_PKCS11_PROVIDER ")",
 	"Show global token information",
 	"List available slots",
 	"List slots with tokens",
@@ -171,9 +230,14 @@ static const char *option_help[] = {
 	"Show objects on token",
 
 	"Sign some data",
+	"Decrypt some data",
 	"Hash some data",
 	"Derive a secret key using another key and some data",
+	"Derive ECDHpass DER encoded pubkey for compatibility with some PKCS#11 implementations",
 	"Specify mechanism (use -M for a list of supported mechanisms)",
+	"Specify hash algorithm used with RSA-PKCS-PSS signature and RSA-PKCS-OAEP decryption",
+	"Specify MGF (Message Generation Function) used for RSA-PSS signature and RSA-OAEP decryption (possible values are MGF1-SHA1 to MGF1-SHA512)",
+	"Specify how many bytes should be used for salt in RSA-PSS signatures (default is digest size)",
 
 	"Log into the token first",
 	"Specify login type ('so', 'user', 'context-specific'; default:'user')",
@@ -186,13 +250,14 @@ static const char *option_help[] = {
 	"Change User PIN",
 	"Unlock User PIN (without '--login' unlock in logged in session; otherwise '--login-type' has to be 'context-specific')",
 	"Key pair generation",
-	"Specify the type and length of the key to create, for example rsa:1024 or EC:prime256v1",
-	"Specify 'sign' key usage flag",
-	"Specify 'decrypt' key usage flag",
-	"Specify 'nonrepudiation' key usage flag",
+	"Key generation",
+	"Specify the type and length of the key to create, for example rsa:1024 or EC:prime256v1 or GOSTR3410:A",
+	"Specify 'sign' key usage flag (sets SIGN in privkey, sets VERIFY in pubkey)",
+	"Specify 'decrypt' key usage flag (RSA only, set DECRYPT privkey, ENCRYPT in pubkey)",
+	"Specify 'derive' key usage flag (EC only)",
 	"Write an object (key, cert, data) to the card",
 	"Get object's CKA_VALUE attribute (use with --type)",
-	"Delete an object",
+	"Delete an object (use with --type cert/data/privkey/pubkey/secrkey)",
 	"Specify the application label of the data object (use with --type data)",
 	"Specify the application ID of the data object (use with --type data)",
 	"Specify the issuer in hexadecimal format (use with --type cert)",
@@ -208,13 +273,19 @@ static const char *option_help[] = {
 	"Use <arg> to create some attributes when writing an object",
 	"Specify the input file",
 	"Specify the output file",
+	"Format for ECDSA signature <arg>: 'rs' (default), 'sequence', 'openssl'",
 
 	"Test (best used with the --login or --pin option)",
 	"Test hotplug capabilities (C_GetSlotList + C_WaitForSlotEvent)",
 	"Test Mozilla-like keypair gen and cert req, <arg>=certfile",
 	"Verbose operation. (Set OPENSC_DEBUG to enable OpenSC specific debugging)",
 	"Set the CKA_PRIVATE attribute (object is only viewable after a login)",
-	"Test EC (best used with the --login or --pin option)"
+	"Set the CKA_SENSITIVE attribute (object cannot be revealed in plaintext)",
+	"Test EC (best used with the --login or --pin option)",
+#ifndef _WIN32
+	"Test forking and calling C_Initialize() in the child",
+#endif
+	"Generate given amount of random data",
 };
 
 static const char *	app_name = "pkcs11-tool"; /* for utils.c */
@@ -222,7 +293,7 @@ static const char *	app_name = "pkcs11-tool"; /* for utils.c */
 static int		verbose = 0;
 static const char *	opt_input = NULL;
 static const char *	opt_output = NULL;
-static const char *	opt_module = NULL;
+static const char *	opt_module = DEFAULT_PKCS11_PROVIDER;
 static int		opt_slot_set = 0;
 static CK_SLOT_ID	opt_slot = 0;
 static const char *	opt_slot_description = NULL;
@@ -238,21 +309,30 @@ static CK_BYTE		opt_object_id[100], new_object_id[100];
 static const char *	opt_attr_from_file = NULL;
 static size_t		opt_object_id_len = 0, new_object_id_len = 0;
 static char *		opt_object_label = NULL;
-static char *		opt_pin = NULL;
-static char *		opt_so_pin = NULL;
-static char *		opt_puk = NULL;
-static char *		opt_new_pin = NULL;
+static const char *	opt_pin = NULL;
+static const char *	opt_so_pin = NULL;
+static const char *	opt_puk = NULL;
+static const char *	opt_new_pin = NULL;
 static char *		opt_application_label = NULL;
 static char *		opt_application_id = NULL;
 static char *		opt_issuer = NULL;
 static char *		opt_subject = NULL;
 static char *		opt_key_type = NULL;
+static char *		opt_sig_format = NULL;
 static int		opt_is_private = 0;
+static int		opt_is_sensitive = 0;
 static int		opt_test_hotplug = 0;
 static int		opt_login_type = -1;
 static int		opt_key_usage_sign = 0;
 static int		opt_key_usage_decrypt = 0;
-static int		opt_key_usage_nonrepudiation = 0;
+static int		opt_key_usage_derive = 0;
+static int		opt_key_usage_default = 1; /* uses defaults if no opt_key_usage options */
+static int		opt_derive_pass_der = 0;
+static unsigned long	opt_random_bytes = 0;
+static CK_MECHANISM_TYPE opt_hash_alg = 0;
+static unsigned long	opt_mgf = 0;
+static long	        salt_len = 0;
+static int		salt_len_given = 0; /* 0 - not given, 1 - given with input parameters */
 
 static void *module = NULL;
 static CK_FUNCTION_LIST_PTR p11 = NULL;
@@ -315,12 +395,13 @@ static void		show_object(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_key(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_cert(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj);
-static void		sign_data(CK_SLOT_ID,
-				CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
+static void		sign_data(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
+static void		decrypt_data(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 static void		hash_data(CK_SLOT_ID, CK_SESSION_HANDLE);
 static void		derive_key(CK_SLOT_ID, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
-static int		gen_keypair(CK_SESSION_HANDLE,
+static int		gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE,
 				CK_OBJECT_HANDLE *, CK_OBJECT_HANDLE *, const char *);
+static int		gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE, CK_OBJECT_HANDLE *, const char *, char *);
 static int		write_object(CK_SESSION_HANDLE session);
 static int		read_object(CK_SESSION_HANDLE session);
 static int		delete_object(CK_SESSION_HANDLE session);
@@ -342,13 +423,20 @@ static const char *	p11_utf8_to_local(CK_UTF8CHAR *, size_t);
 static const char *	p11_flag_names(struct flag_info *, CK_FLAGS);
 static const char *	p11_mechanism_to_name(CK_MECHANISM_TYPE);
 static CK_MECHANISM_TYPE p11_name_to_mechanism(const char *);
+static const char *	p11_mgf_to_name(CK_RSA_PKCS_MGF_TYPE);
+static CK_MECHANISM_TYPE p11_name_to_mgf(const char *);
 static void		p11_perror(const char *, CK_RV);
 static const char *	CKR2Str(CK_ULONG res);
 static int		p11_test(CK_SESSION_HANDLE session);
 static int test_card_detection(int);
 static int		hex_to_bin(const char *in, CK_BYTE *out, size_t *outlen);
-static void		test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session);
+static void		pseudo_randomize(unsigned char *data, size_t dataLen);
+static CK_SESSION_HANDLE test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session);
 static void		test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session);
+#ifndef _WIN32
+static void		test_fork(void);
+#endif
+static void		generate_random(CK_SESSION_HANDLE session);
 static CK_RV		find_object_with_attributes(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *out,
 				CK_ATTRIBUTE *attrs, CK_ULONG attrsLen, CK_ULONG obj_index);
 static CK_ULONG		get_private_key_length(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE prkey);
@@ -357,6 +445,80 @@ static CK_ULONG		get_private_key_length(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE
 #ifndef O_BINARY
 # define O_BINARY 0
 #endif
+
+#define ATTR_METHOD(ATTR, TYPE) \
+static TYPE \
+get##ATTR(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj) \
+{ \
+	TYPE		type = 0; \
+	CK_ATTRIBUTE	attr = { CKA_##ATTR, &type, sizeof(type) }; \
+	CK_RV		rv; \
+ \
+	rv = p11->C_GetAttributeValue(sess, obj, &attr, 1); \
+	if (rv != CKR_OK) \
+		p11_warn("C_GetAttributeValue(" #ATTR ")", rv); \
+	return type; \
+}
+
+#define VARATTR_METHOD(ATTR, TYPE) \
+static TYPE * \
+get##ATTR(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj, CK_ULONG_PTR pulCount) \
+{ \
+	CK_ATTRIBUTE	attr = { CKA_##ATTR, NULL, 0 };		\
+	CK_RV		rv;					\
+	if (pulCount)						\
+		*pulCount = 0;					\
+	rv = p11->C_GetAttributeValue(sess, obj, &attr, 1);	\
+	if (rv == CKR_OK) {					\
+		if (attr.ulValueLen == (CK_ULONG)(-1))		\
+			return NULL;				\
+		if (!(attr.pValue = calloc(1, attr.ulValueLen + 1)))		\
+			util_fatal("out of memory in get" #ATTR ": %m");	\
+		rv = p11->C_GetAttributeValue(sess, obj, &attr, 1);		\
+		if (attr.ulValueLen == (CK_ULONG)(-1)) {	\
+			free(attr.pValue);			\
+			return NULL;				\
+		}						\
+		if (pulCount)					\
+			*pulCount = attr.ulValueLen / sizeof(TYPE);	\
+	} else {						\
+		p11_warn("C_GetAttributeValue(" #ATTR ")", rv);	\
+	}							\
+	return (TYPE *) attr.pValue;				\
+}
+
+/*
+ * Define attribute accessors
+ */
+ATTR_METHOD(CLASS, CK_OBJECT_CLASS);
+ATTR_METHOD(ALWAYS_AUTHENTICATE, CK_BBOOL);
+ATTR_METHOD(PRIVATE, CK_BBOOL);
+ATTR_METHOD(MODIFIABLE, CK_BBOOL);
+ATTR_METHOD(ENCRYPT, CK_BBOOL);
+ATTR_METHOD(DECRYPT, CK_BBOOL);
+ATTR_METHOD(SIGN, CK_BBOOL);
+ATTR_METHOD(VERIFY, CK_BBOOL);
+ATTR_METHOD(WRAP, CK_BBOOL);
+ATTR_METHOD(UNWRAP, CK_BBOOL);
+ATTR_METHOD(DERIVE, CK_BBOOL);
+ATTR_METHOD(OPENSC_NON_REPUDIATION, CK_BBOOL);
+ATTR_METHOD(KEY_TYPE, CK_KEY_TYPE);
+ATTR_METHOD(CERTIFICATE_TYPE, CK_CERTIFICATE_TYPE);
+ATTR_METHOD(MODULUS_BITS, CK_ULONG);
+ATTR_METHOD(VALUE_LEN, CK_ULONG);
+VARATTR_METHOD(LABEL, char);
+VARATTR_METHOD(APPLICATION, char);
+VARATTR_METHOD(ID, unsigned char);
+VARATTR_METHOD(OBJECT_ID, unsigned char);
+VARATTR_METHOD(MODULUS, CK_BYTE);
+#ifdef ENABLE_OPENSSL
+VARATTR_METHOD(PUBLIC_EXPONENT, CK_BYTE);
+#endif
+VARATTR_METHOD(VALUE, unsigned char);
+VARATTR_METHOD(GOSTR3410_PARAMS, unsigned char);
+VARATTR_METHOD(EC_POINT, unsigned char);
+VARATTR_METHOD(EC_PARAMS, unsigned char);
+
 
 int main(int argc, char * argv[])
 {
@@ -369,9 +531,11 @@ int main(int argc, char * argv[])
 	int do_list_mechs = 0;
 	int do_list_objects = 0;
 	int do_sign = 0;
+	int do_decrypt = 0;
 	int do_hash = 0;
 	int do_derive = 0;
 	int do_gen_keypair = 0;
+	int do_gen_key = 0;
 	int do_write_object = 0;
 	int do_read_object = 0;
 	int do_delete_object = 0;
@@ -379,6 +543,9 @@ int main(int argc, char * argv[])
 	int do_test = 0;
 	int do_test_kpgen_certwrite = 0;
 	int do_test_ec = 0;
+#ifndef _WIN32
+	int do_test_fork = 0;
+#endif
 	int need_session = 0;
 	int opt_login = 0;
 	int do_init_token = 0;
@@ -386,23 +553,37 @@ int main(int argc, char * argv[])
 	int do_change_pin = 0;
 	int do_unlock_pin = 0;
 	int action_count = 0;
+	int do_generate_random = 0;
 	CK_RV rv;
 
 #ifdef _WIN32
-	if (_set_fmode(_O_BINARY) == EINVAL)
+	char expanded_val[PATH_MAX];
+	DWORD expanded_len;
+
+	if(_setmode(_fileno(stdout), _O_BINARY ) == -1)
+		util_fatal("Cannot set FMODE to O_BINARY");
+	if(_setmode(_fileno(stdin), _O_BINARY ) == -1)
 		util_fatal("Cannot set FMODE to O_BINARY");
 #endif
 
 #ifdef ENABLE_OPENSSL
-#if OPENSSL_VERSION_NUMBER >= 0x00907000L
+#if (OPENSSL_VERSION_NUMBER >= 0x00907000L && OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
 	OPENSSL_config(NULL);
 #endif
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS
+		| OPENSSL_INIT_ADD_ALL_CIPHERS
+		| OPENSSL_INIT_ADD_ALL_DIGESTS
+		| OPENSSL_INIT_LOAD_CONFIG,
+		NULL);
+#else
 	/* OpenSSL magic */
-	SSLeay_add_all_algorithms();
-	CRYPTO_malloc_init();
+	OpenSSL_add_all_algorithms();
+	OPENSSL_malloc_init();
+#endif
 #endif
 	while (1) {
-		c = getopt_long(argc, argv, "ILMOTa:bd:e:hi:klm:o:p:scvty:w:z:r",
+		c = getopt_long(argc, argv, "ILMOTa:bd:e:hi:klm:o:p:scvf:ty:w:z:r",
 		                options, &long_optind);
 		if (c == -1)
 			break;
@@ -439,6 +620,11 @@ int main(int argc, char * argv[])
 			do_gen_keypair = 1;
 			action_count++;
 			break;
+		case OPT_GENERATE_KEY:
+			need_session |= NEED_SESSION_RW;
+			do_gen_key = 1;
+			action_count++;
+			break;
 		case 'w':
 			need_session |= NEED_SESSION_RW;
 			do_write_object = 1;
@@ -460,7 +646,7 @@ int main(int argc, char * argv[])
 			do_set_id = 1;
 			new_object_id_len = sizeof(new_object_id);
 			if (!hex_to_bin(optarg, new_object_id, &new_object_id_len)) {
-				printf("Invalid ID \"%s\"\n", optarg);
+				fprintf(stderr, "Invalid ID \"%s\"\n", optarg);
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			action_count++;
@@ -474,19 +660,21 @@ int main(int argc, char * argv[])
 				opt_object_class = CKO_CERTIFICATE;
 			else if (strcmp(optarg, "privkey") == 0)
 				opt_object_class = CKO_PRIVATE_KEY;
+			else if (strcmp(optarg, "secrkey") == 0)
+				opt_object_class = CKO_SECRET_KEY;
 			else if (strcmp(optarg, "pubkey") == 0)
 				opt_object_class = CKO_PUBLIC_KEY;
 			else if (strcmp(optarg, "data") == 0)
 				opt_object_class = CKO_DATA;
 			else {
-				printf("Unsupported object type \"%s\"\n", optarg);
+				fprintf(stderr, "Unsupported object type \"%s\"\n", optarg);
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			break;
 		case 'd':
 			opt_object_id_len = sizeof(opt_object_id);
 			if (!hex_to_bin(optarg, opt_object_id, &opt_object_id_len)) {
-				printf("Invalid ID \"%s\"\n", optarg);
+				fprintf(stderr, "Invalid ID \"%s\"\n", optarg);
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			break;
@@ -504,11 +692,23 @@ int main(int argc, char * argv[])
 			opt_mechanism_used = 1;
 			opt_mechanism = p11_name_to_mechanism(optarg);
 			break;
+		case OPT_HASH_ALGORITHM:
+			opt_hash_alg = p11_name_to_mechanism(optarg);
+			break;
+		case OPT_MGF:
+			opt_mgf = p11_name_to_mgf(optarg);
+			break;
+		case OPT_SALT:
+			salt_len = (CK_ULONG) strtoul(optarg, NULL, 0);
+			salt_len_given = 1;
+			break;
 		case 'o':
 			opt_output = optarg;
 			break;
 		case 'p':
-			opt_pin = optarg;
+			need_session |= NEED_SESSION_RW;
+			opt_login = 1;
+			util_get_pin(optarg, &opt_pin);
 			break;
 		case 'c':
 			do_change_pin = 1;
@@ -524,6 +724,14 @@ int main(int argc, char * argv[])
 			need_session |= NEED_SESSION_RW;
 			do_sign = 1;
 			action_count++;
+			break;
+		case OPT_DECRYPT:
+			need_session |= NEED_SESSION_RW;
+			do_decrypt = 1;
+			action_count++;
+			break;
+		case 'f':
+			opt_sig_format = optarg;
 			break;
 		case 't':
 			need_session |= NEED_SESSION_RO;
@@ -582,10 +790,10 @@ int main(int argc, char * argv[])
 			opt_subject = optarg;
 			break;
 		case OPT_NEW_PIN:
-			opt_new_pin = optarg;
+			util_get_pin(optarg, &opt_new_pin);
 			break;
 		case OPT_PUK:
-			opt_puk = optarg;
+			util_get_pin(optarg, &opt_puk);
 			break;
 		case OPT_LOGIN_TYPE:
 			if (!strcmp(optarg, "so"))
@@ -595,12 +803,12 @@ int main(int argc, char * argv[])
 			else if (!strcmp(optarg, "context-specific"))
 				opt_login_type = CKU_CONTEXT_SPECIFIC;
 			else {
-				printf("Unsupported login type \"%s\"\n", optarg);
+				fprintf(stderr, "Unsupported login type \"%s\"\n", optarg);
 				util_print_usage_and_die(app_name, options, option_help, NULL);
 			}
 			break;
 		case OPT_SO_PIN:
-			opt_so_pin = optarg;
+			util_get_pin(optarg, &opt_so_pin);
 			break;
 		case OPT_INIT_TOKEN:
 			do_init_token = 1;
@@ -616,15 +824,21 @@ int main(int argc, char * argv[])
 			break;
 		case OPT_KEY_USAGE_SIGN:
 			opt_key_usage_sign = 1;
+			opt_key_usage_default = 0;
 			break;
 		case OPT_KEY_USAGE_DECRYPT:
 			opt_key_usage_decrypt = 1;
+			opt_key_usage_default = 0;
 			break;
-		case OPT_KEY_USAGE_NONREPUDIATION:
-			opt_key_usage_nonrepudiation = 1;
+		case OPT_KEY_USAGE_DERIVE:
+			opt_key_usage_derive = 1;
+			opt_key_usage_default = 0;
 			break;
 		case OPT_PRIVATE:
 			opt_is_private = 1;
+			break;
+		case OPT_SENSITIVE:
+			opt_is_sensitive = 1;
 			break;
 		case OPT_TEST_HOTPLUG:
 			opt_test_hotplug = 1;
@@ -634,29 +848,59 @@ int main(int argc, char * argv[])
 			do_test_ec = 1;
 			action_count++;
 			break;
+		case OPT_DERIVE_PASS_DER:
+			opt_derive_pass_der = 1;
+			/* fall through */
 		case OPT_DERIVE:
 			need_session |= NEED_SESSION_RW;
 			do_derive = 1;
 			action_count++;
 			break;
+#ifndef _WIN32
+		case OPT_TEST_FORK:
+			do_test_fork = 1;
+			action_count++;
+			break;
+#endif
+		case OPT_GENERATE_RANDOM:
+			need_session |= NEED_SESSION_RO;
+			opt_random_bytes = strtoul(optarg, NULL, 0);
+			do_generate_random = 1;
+			action_count++;
+			break;
+
 		default:
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		}
 	}
-
-	if (opt_module == NULL)
-		util_print_usage_and_die(app_name, options, option_help, NULL);
+	if (optind < argc) {
+		util_fatal("invalid option(s) given");
+	}
 
 	if (action_count == 0)
 		util_print_usage_and_die(app_name, options, option_help, NULL);
+
+#ifdef _WIN32
+	expanded_len = PATH_MAX;
+	expanded_len = ExpandEnvironmentStringsA(opt_module, expanded_val, expanded_len);
+	if (0 < expanded_len && expanded_len < sizeof expanded_val)
+		opt_module = expanded_val;
+#endif
 
 	module = C_LoadModule(opt_module, &p11);
 	if (module == NULL)
 		util_fatal("Failed to load pkcs11 module");
 
 	rv = p11->C_Initialize(NULL);
-	if (rv != CKR_OK)
+	if (rv == CKR_CRYPTOKI_ALREADY_INITIALIZED)
+		fprintf(stderr, "\n*** Cryptoki library has already been initialized ***\n");
+	else if (rv != CKR_OK)
 		p11_fatal("C_Initialize", rv);
+
+#ifndef _WIN32
+	if (do_test_fork)
+		test_fork();
+#endif
 
 	if (do_show_info)
 		show_cryptoki_info();
@@ -728,12 +972,12 @@ int main(int argc, char * argv[])
 	if (do_list_mechs)
 		list_mechs(opt_slot);
 
-	if (do_sign) {
+	if (do_sign || do_decrypt) {
 		CK_TOKEN_INFO	info;
 
 		get_token_info(opt_slot, &info);
 		if (!(info.flags & CKF_TOKEN_INITIALIZED))
-			util_fatal("Token not initialized\n");
+			util_fatal("Token not initialized");
 		if (info.flags & CKF_LOGIN_REQUIRED)
 			opt_login++;
 	}
@@ -771,7 +1015,7 @@ int main(int argc, char * argv[])
 	if (do_unlock_pin)   {
 		if (opt_login_type != -1
 				&& opt_login_type != CKU_CONTEXT_SPECIFIC)   {
-			printf("Invalid login type for 'Unlock User PIN' operation\n");
+			fprintf(stderr, "Invalid login type for 'Unlock User PIN' operation\n");
 			util_print_usage_and_die(app_name, options, option_help, NULL);
 		}
 
@@ -785,7 +1029,7 @@ int main(int argc, char * argv[])
 		goto end;
 	}
 
-	if (do_sign || do_derive) {
+	if (do_sign || do_derive || do_decrypt) {
 		if (!find_object(session, CKO_PRIVATE_KEY, &object,
 					opt_object_id_len ? opt_object_id : NULL,
 					opt_object_id_len, 0))
@@ -802,17 +1046,25 @@ int main(int argc, char * argv[])
 	if (do_sign)
 		sign_data(opt_slot, session, object);
 
+	if (do_decrypt)
+		decrypt_data(opt_slot, session, object);
+
 	if (do_hash)
 		hash_data(opt_slot, session);
 
 	if (do_gen_keypair) {
 		CK_OBJECT_HANDLE hPublicKey, hPrivateKey;
-		gen_keypair(session, &hPublicKey, &hPrivateKey, opt_key_type);
+		gen_keypair(opt_slot, session, &hPublicKey, &hPrivateKey, opt_key_type);
+	}
+
+	if (do_gen_key) {
+		CK_OBJECT_HANDLE hSecretKey;
+		gen_key(opt_slot, session, &hSecretKey, opt_key_type, NULL);
 	}
 
 	if (do_write_object) {
 		if (opt_object_class_str == NULL)
-			util_fatal("You should specify the object type with the -y option\n");
+			util_fatal("You should specify the object type with the -y option");
 		write_object(session);
 	}
 
@@ -823,7 +1075,7 @@ int main(int argc, char * argv[])
 				opt_application_label == NULL && opt_application_id == NULL &&
 				opt_issuer == NULL && opt_subject == NULL)
 			 util_fatal("You should specify at least one of the "
-					 "object ID, object label, application label or application ID\n");
+					 "object ID, object label, application label or application ID");
 		read_object(session);
 	}
 
@@ -833,26 +1085,39 @@ int main(int argc, char * argv[])
 		if (opt_object_id_len == 0 && opt_object_label == NULL &&
 				opt_application_label == NULL && opt_application_id == NULL)
 			 util_fatal("You should specify at least one of the "
-					 "object ID, object label, application label or application ID\n");
+					 "object ID, object label, application label or application ID");
 		delete_object(session);
 	}
 
 	if (do_set_id) {
 		if (opt_object_class_str == NULL)
-			util_fatal("You should specify the object type with the -y option\n");
+			util_fatal("You should specify the object type with the -y option");
 		if (opt_object_id_len == 0)
-			util_fatal("You should specify the current ID with the -d option\n");
+			util_fatal("You should specify the current ID with the -d option");
 		set_id_attr(session);
 	}
 
 	if (do_test)
 		p11_test(session);
 
-	if (do_test_kpgen_certwrite)
-		test_kpgen_certwrite(opt_slot, session);
+	if (do_test_kpgen_certwrite) {
+		if (!opt_login)
+			fprintf(stderr, "ERR: login required\n");
+		else
+			session = test_kpgen_certwrite(opt_slot, session);
+	}
 
-	if (do_test_ec)
-		test_ec(opt_slot, session);
+	if (do_test_ec) {
+		if (!opt_login)
+			fprintf(stderr, "ERR: login required\n");
+		else
+			test_ec(opt_slot, session);
+	}
+
+	if (do_generate_random) {
+		generate_random(session);
+	}
+
 end:
 	if (session != CK_INVALID_HANDLE) {
 		rv = p11->C_CloseSession(session);
@@ -867,6 +1132,7 @@ end:
 
 	return err;
 }
+
 
 static void show_cryptoki_info(void)
 {
@@ -901,10 +1167,11 @@ static void list_slots(int tokens, int refresh, int print)
 		rv = p11->C_GetSlotList(tokens, NULL, &p11_num_slots);
 		if (rv != CKR_OK)
 			p11_fatal("C_GetSlotList(NULL)", rv);
+		free(p11_slots);
 		p11_slots = calloc(p11_num_slots, sizeof(CK_SLOT_ID));
 		if (p11_slots == NULL) {
 			perror("calloc failed");
-			return;
+			exit(1);
 		}
 
 		rv = p11->C_GetSlotList(tokens, p11_slots, &p11_num_slots);
@@ -955,6 +1222,9 @@ static void show_token(CK_SLOT_ID slot)
 	if (rv == CKR_TOKEN_NOT_RECOGNIZED) {
 		printf("  (token not recognized)\n");
 		return;
+	} else if (rv != CKR_OK) {
+		printf("C_GetTokenInfo() failed: rv = %s\n", CKR2Str(rv));
+		return;
 	}
 	if (!(info.flags & CKF_TOKEN_INITIALIZED) && (!verbose)) {
 		printf("  token state:   uninitialized\n");
@@ -976,6 +1246,7 @@ static void show_token(CK_SLOT_ID slot)
 	printf("  firmware version   : %d.%d\n", info.firmwareVersion.major, info.firmwareVersion.minor);
 	printf("  serial num         : %s\n", p11_utf8_to_local(info.serialNumber,
 			sizeof(info.serialNumber)));
+	printf("  pin min/max        : %lu/%lu\n", info.ulMinPinLen, info.ulMaxPinLen);
 }
 
 static void list_mechs(CK_SLOT_ID slot)
@@ -1071,29 +1342,50 @@ static int login(CK_SESSION_HANDLE session, int login_type)
 	int		pin_allocated = 0, r;
 	CK_TOKEN_INFO	info;
 	CK_RV		rv;
+	CK_FLAGS	pin_flags;
 
 	get_token_info(opt_slot, &info);
 
 	/* Identify which pin to enter */
 
 	if (login_type == CKU_SO)
-		pin = opt_so_pin;
+		pin = (char *) opt_so_pin;
 	else if (login_type == CKU_USER)
-		pin = opt_pin;
+		pin = (char *) opt_pin;
 	else if (login_type == CKU_CONTEXT_SPECIFIC)
-		pin = opt_pin ? opt_pin : opt_puk;
+		pin = opt_pin ? (char *) opt_pin : (char *) opt_puk;
 
 	if (!pin && !(info.flags & CKF_PROTECTED_AUTHENTICATION_PATH)) {
-			printf("Logging in to \"%s\".\n", p11_utf8_to_local(info.label, sizeof(info.label)));
-		if (login_type == CKU_SO)
+		printf("Logging in to \"%s\".\n", p11_utf8_to_local(info.label, sizeof(info.label)));
+		if (login_type == CKU_SO)   {
+			pin_flags=info.flags & (
+				CKF_SO_PIN_COUNT_LOW |
+				CKF_SO_PIN_FINAL_TRY |
+				CKF_SO_PIN_LOCKED |
+				CKF_SO_PIN_TO_BE_CHANGED);
+			if(pin_flags)
+				printf("WARNING: %s\n",p11_token_info_flags(pin_flags));
+
 			printf("Please enter SO PIN: ");
-		else if (login_type == CKU_USER)
+		}
+		else if (login_type == CKU_USER)   {
+			pin_flags=info.flags & (
+				CKF_USER_PIN_COUNT_LOW |
+				CKF_USER_PIN_FINAL_TRY |
+				CKF_USER_PIN_LOCKED |
+				CKF_USER_PIN_TO_BE_CHANGED);
+			if(pin_flags)
+				printf("WARNING: %s\n",p11_token_info_flags(pin_flags));
+
 			printf("Please enter User PIN: ");
-		else if (login_type == CKU_CONTEXT_SPECIFIC)
+		}
+		else if (login_type == CKU_CONTEXT_SPECIFIC)   {
 			printf("Please enter context specific PIN: ");
+		}
+
 		r = util_getpass(&pin, &len, stdin);
 		if (r < 0)
-			util_fatal("No PIN entered, exiting!\n");
+			util_fatal("util_getpass error");
 		pin_allocated = 1;
 	}
 
@@ -1122,34 +1414,32 @@ static void init_token(CK_SLOT_ID slot)
 	CK_RV rv;
 
 	if (!opt_object_label)
-		util_fatal("The token label must be specified using --label\n");
+		util_fatal("The token label must be specified using --label");
 	snprintf((char *) token_label, sizeof (token_label), "%-32.32s",
 			opt_object_label);
 
 	get_token_info(slot, &info);
-	if (!(info.flags & CKF_PROTECTED_AUTHENTICATION_PATH)) {
-		if (opt_so_pin == NULL) {
+	if (opt_so_pin != NULL) {
+		new_pin = (char *) opt_so_pin;
+	} else {
+		if (!(info.flags & CKF_PROTECTED_AUTHENTICATION_PATH)) {
 			printf("Please enter the new SO PIN: ");
 			r = util_getpass(&new_pin, &len, stdin);
 			if (r < 0)
-				util_fatal("No PIN entered, exiting\n");
+				util_fatal("No PIN entered");
 			if (!new_pin || !*new_pin || strlen(new_pin) > 20)
-				util_fatal("Invalid SO PIN\n");
-			strcpy(new_buf, new_pin);
+				util_fatal("Invalid SO PIN");
+			strlcpy(new_buf, new_pin, sizeof new_buf);
 			free(new_pin); new_pin = NULL;
 			printf("Please enter the new SO PIN (again): ");
 			r = util_getpass(&new_pin, &len, stdin);
 			if (r < 0)
-				util_fatal("No PIN entered, exiting\n");
+				util_fatal("No PIN entered");
 			if (!new_pin || !*new_pin ||
 					strcmp(new_buf, new_pin) != 0)
-				util_fatal("Different new SO PINs, exiting\n");
+				util_fatal("Different new SO PINs");
 			pin_allocated = 1;
-		} else {
-			new_pin = opt_so_pin;
 		}
-		if (!new_pin || !*new_pin)
-			util_fatal("Invalid SO PIN\n");
 	}
 
 	rv = p11->C_InitToken(slot, (CK_UTF8CHAR *) new_pin,
@@ -1178,21 +1468,21 @@ static void init_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess)
 			printf("Please enter the new PIN: ");
 			r = util_getpass(&new_pin1,&len1,stdin);
 			if (r < 0)
-				util_fatal("No PIN entered, aborting.\n");
+				util_fatal("No PIN entered");
 			if (!new_pin1 || !*new_pin1 || strlen(new_pin1) > 20)
-				util_fatal("Invalid User PIN\n");
+				util_fatal("Invalid User PIN");
 			printf("Please enter the new PIN again: ");
 			r = util_getpass(&new_pin2, &len2, stdin);
 			if (r < 0)
-				util_fatal("No PIN entered, aborting.\n");
+				util_fatal("No PIN entered");
 			if (!new_pin2 || !*new_pin2 ||
 					strcmp(new_pin1, new_pin2) != 0)
-				util_fatal("Different new User PINs, exiting\n");
+				util_fatal("Different new User PINs");
 		}
 	}
 
-	pin = opt_pin;
-	if (!pin) pin = opt_new_pin;
+	pin = (char *) opt_pin;
+	if (!pin) pin = (char *) opt_new_pin;
 	if (!pin) pin = new_pin1;
 
 	rv = p11->C_InitPIN(sess, (CK_UTF8CHAR *) pin, pin == NULL ? 0 : strlen(pin));
@@ -1235,9 +1525,9 @@ static int change_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess)
 		}
 		else   {
 			if (opt_so_pin)
-				old_pin = opt_so_pin;
+				old_pin = (char *) opt_so_pin;
 			else
-				old_pin = opt_pin;
+				old_pin = (char *) opt_pin;
 		}
 
 		if (!opt_new_pin) {
@@ -1253,11 +1543,13 @@ static int change_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess)
 			r = util_getpass(&new_pin, &len, stdin);
 			if (r < 0)
 				return 1;
-			if (!new_pin || !*new_pin || strcmp(new_buf, new_pin) != 0)
+			if (!new_pin || !*new_pin || strcmp(new_buf, new_pin) != 0) {
+				free(new_pin);
 				return 1;
+			}
 		}
 		else   {
-			new_pin = opt_new_pin;
+			new_pin = (char *) opt_new_pin;
 		}
 	}
 
@@ -1284,9 +1576,9 @@ static int unlock_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess, int login_type)
 	get_token_info(slot, &info);
 
 	if (login_type == CKU_CONTEXT_SPECIFIC)
-		unlock_code = opt_pin ? opt_pin : opt_puk;
+		unlock_code = opt_pin ? (char *) opt_pin : (char *) opt_puk;
 	else if (login_type == -1)
-		unlock_code = opt_puk;
+		unlock_code = (char *) opt_puk;
 	else
 		return 1;
 
@@ -1306,25 +1598,30 @@ static int unlock_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess, int login_type)
 		unlock_code = unlock_buf;
 	}
 
-	new_pin = opt_new_pin;
+	new_pin = (char *) opt_new_pin;
 	if (!(info.flags & CKF_PROTECTED_AUTHENTICATION_PATH) && !new_pin)   {
 		printf("Please enter the new PIN: ");
 		r = util_getpass(&new_pin, &len, stdin);
 		if (r < 0)
 			return 1;
-		strcpy(new_buf, new_pin);
+		strlcpy(new_buf, new_pin, sizeof new_buf);
 
 		printf("Please enter the new PIN again: ");
 		r = util_getpass(&new_pin, &len, stdin);
 		if (r < 0)
 			return 1;
 		if (!new_pin || !*new_pin || strcmp(new_buf, new_pin) != 0) {
+			if (new_pin != opt_new_pin)
+				free(new_pin);
 			printf("  different new PINs, exiting\n");
 			return -1;
 		}
 
-		if (!new_pin || !*new_pin || strlen(new_pin) > 20)
+		if (!new_pin || !*new_pin || strlen(new_pin) > 20) {
+			if (new_pin != opt_new_pin)
+				free(new_pin);
 			return 1;
+		}
 	}
 
 	rv = p11->C_SetPIN(sess,
@@ -1337,22 +1634,148 @@ static int unlock_pin(CK_SLOT_ID slot, CK_SESSION_HANDLE sess, int login_type)
 	return 0;
 }
 
+/* return digest length in bytes */
+static unsigned long figure_pss_salt_length(const int hash) {
+	unsigned long sLen = 0;
+	switch (hash) {
+	case  CKM_SHA_1:
+		sLen = 20;
+		break;
+	case  CKM_SHA224:
+		sLen = 28;
+		break;
+	case  CKM_SHA256:
+		sLen = 32;
+		break;
+	case  CKM_SHA384:
+		sLen = 48;
+		break;
+	case  CKM_SHA512:
+		sLen = 64;
+		break;
+	default:
+		util_fatal("Unknown hash algorithm '%s' for RSA-PSS signatures",
+			p11_mechanism_to_name(hash));
+		break;
+	}
+	return sLen;
+}
+
 static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		CK_OBJECT_HANDLE key)
 {
 	unsigned char	in_buffer[1025], sig_buffer[512];
 	CK_MECHANISM	mech;
+	CK_RSA_PKCS_PSS_PARAMS pss_params;
 	CK_RV		rv;
 	CK_ULONG	sig_len;
 	int		fd, r;
 
+	unsigned long hashlen = 0, modlen = 0;
+
 	if (!opt_mechanism_used)
 		if (!find_mechanism(slot, CKF_SIGN|CKF_HW, NULL, 0, &opt_mechanism))
-			util_fatal("Sign mechanism not supported\n");
+			util_fatal("Sign mechanism not supported");
 
-	printf("Using signature algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
+	fprintf(stderr, "Using signature algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
 	memset(&mech, 0, sizeof(mech));
 	mech.mechanism = opt_mechanism;
+	pss_params.hashAlg = 0;
+
+	if (opt_hash_alg != 0 && opt_mechanism != CKM_RSA_PKCS_PSS)
+		util_fatal("The hash-algorithm is applicable only to "
+			"RSA-PKCS-PSS mechanism");
+
+	/* set "default" MGF and hash algorithms. We can overwrite MGF later */
+	switch (opt_mechanism) {
+	case CKM_RSA_PKCS_PSS:
+		pss_params.hashAlg = opt_hash_alg;
+
+		switch (opt_hash_alg) {
+		case CKM_SHA224:
+			pss_params.mgf = CKG_MGF1_SHA224;
+			break;
+		case CKM_SHA256:
+			pss_params.mgf = CKG_MGF1_SHA256;
+			break;
+		case CKM_SHA384:
+			pss_params.mgf = CKG_MGF1_SHA384;
+			break;
+		case CKM_SHA512:
+			pss_params.mgf = CKG_MGF1_SHA512;
+			break;
+		default:
+			/* the PSS should use SHA-1 if not specified */
+			pss_params.hashAlg = CKM_SHA_1;
+			/* fallthrough */
+		case CKM_SHA_1:
+			pss_params.mgf = CKG_MGF1_SHA1;
+		}
+		break;
+
+	case CKM_SHA1_RSA_PKCS_PSS:
+		pss_params.hashAlg = CKM_SHA_1;
+		pss_params.mgf = CKG_MGF1_SHA1;
+		break;
+
+	case CKM_SHA224_RSA_PKCS_PSS:
+		pss_params.hashAlg = CKM_SHA224;
+		pss_params.mgf = CKG_MGF1_SHA224;
+		break;
+
+	case CKM_SHA256_RSA_PKCS_PSS:
+		pss_params.hashAlg = CKM_SHA256;
+		pss_params.mgf = CKG_MGF1_SHA256;
+		break;
+
+	case CKM_SHA384_RSA_PKCS_PSS:
+		pss_params.hashAlg = CKM_SHA384;
+		pss_params.mgf = CKG_MGF1_SHA384;
+		break;
+
+	case CKM_SHA512_RSA_PKCS_PSS:
+		pss_params.hashAlg = CKM_SHA512;
+		pss_params.mgf = CKG_MGF1_SHA512;
+		break;
+	}
+
+	/* One of RSA-PSS mechanisms above: They need parameters */
+	if (pss_params.hashAlg) {
+		if (opt_mgf != 0)
+			pss_params.mgf = opt_mgf;
+
+		hashlen = figure_pss_salt_length(pss_params.hashAlg);
+
+		if (salt_len_given == 1) { /* salt size explicitly given */
+			if (salt_len < 0 && salt_len != -1 && salt_len != -2)
+				util_fatal("Salt length must be greater or equal \
+to zero, or equal to -1 (meaning: use digest size) or to -2 \
+(meaning: use maximum permissible size");
+		  
+			modlen = (get_private_key_length(session, key) + 7) / 8;
+			switch(salt_len) {
+			case -1: /* salt size equals to digest size */
+				pss_params.sLen = hashlen;
+				break;
+			case -2: /* maximum permissible salt len */
+				pss_params.sLen = modlen - hashlen -2;
+				break;
+			default: /* use given size but its value must be >= 0 */
+				pss_params.sLen = salt_len;
+				break;
+			} /* end switch (salt_len_given) */
+		} else { /* use default: salt len of digest size */
+			pss_params.sLen = hashlen;
+		}
+
+		mech.pParameter = &pss_params;
+		mech.ulParameterLen = sizeof(pss_params);
+
+		fprintf(stderr, "PSS parameters: hashAlg=%s, mgf=%s, salt_len=%lu B\n",
+			p11_mechanism_to_name(pss_params.hashAlg),
+			p11_mgf_to_name(pss_params.mgf),
+			pss_params.sLen);
+	}
 
 	if (opt_input == NULL)
 		fd = 0;
@@ -1363,11 +1786,17 @@ static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 	if (r < 0)
 		util_fatal("Cannot read from %s: %m", opt_input);
 
+	if (opt_mechanism == CKM_RSA_PKCS_PSS && (unsigned long)r != hashlen)
+		util_fatal("For %s mechanism, message size (got %d bytes) must be equal to specified digest length (%lu)\n",
+			p11_mechanism_to_name(opt_mechanism), r, hashlen);
+
 	rv = CKR_CANCEL;
 	if (r < (int) sizeof(in_buffer))   {
 		rv = p11->C_SignInit(session, &mech, key);
 		if (rv != CKR_OK)
 			p11_fatal("C_SignInit", rv);
+		if (getALWAYS_AUTHENTICATE(session, key))
+			login(session,CKU_CONTEXT_SPECIFIC);
 
 		sig_len = sizeof(sig_buffer);
 		rv =  p11->C_Sign(session, in_buffer, r, sig_buffer, &sig_len);
@@ -1377,6 +1806,8 @@ static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		rv = p11->C_SignInit(session, &mech, key);
 		if (rv != CKR_OK)
 			p11_fatal("C_SignInit", rv);
+		if (getALWAYS_AUTHENTICATE(session, key))
+			login(session,CKU_CONTEXT_SPECIFIC);
 
 		do   {
 			rv = p11->C_SignUpdate(session, in_buffer, r);
@@ -1401,38 +1832,149 @@ static void sign_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 		util_fatal("failed to open %s: %m", opt_output);
 	}
 
-#if defined(ENABLE_OPENSSL) && OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
-/*
- * PKCS11 implies the ECDSA sig is 2nLen,
- * OpenSSL expects sequence of {integer, integer}
- * so we will write it for OpenSSL if built with OpenSSL
- */
-	if (opt_mechanism == CKM_ECDSA) {
-		int nLen;
-		ECDSA_SIG * ecsig = NULL;
-		unsigned char *p = NULL;
-		int der_len;
+	if (opt_mechanism == CKM_ECDSA || opt_mechanism == CKM_ECDSA_SHA1 || opt_mechanism == CKM_ECDSA_SHA256 || opt_mechanism == CKM_ECDSA_SHA384 || opt_mechanism == CKM_ECDSA_SHA512 || opt_mechanism == CKM_ECDSA_SHA224) {
+		if (opt_sig_format &&  (!strcmp(opt_sig_format, "openssl") || !strcmp(opt_sig_format, "sequence"))) {
+			unsigned char *seq;
+			size_t seqlen;
 
-		nLen = sig_len/2;
+			if (sc_asn1_sig_value_rs_to_sequence(NULL, sig_buffer, sig_len, &seq, &seqlen)) {
+				util_fatal("Failed to convert signature to ASN.1 sequence format");
+			}
 
-		ecsig = ECDSA_SIG_new();
-		ecsig->r = BN_bin2bn(sig_buffer, nLen, ecsig->r);
-		ecsig->s = BN_bin2bn(sig_buffer + nLen, nLen, ecsig->s);
+			memcpy(sig_buffer, seq, seqlen);
+			sig_len = seqlen;
 
-		der_len = i2d_ECDSA_SIG(ecsig, &p);
-		printf("Writing OpenSSL ECDSA_SIG\n");
-		r = write(fd, p, der_len);
-		free(p);
-		ECDSA_SIG_free(ecsig);
-
-	} else
-#endif /* ENABLE_OPENSSL  && !OPENSSL_NO_EC && !OPENSSL_NO_ECDSA */
+			free(seq);
+		}
+	}
 	r = write(fd, sig_buffer, sig_len);
+
 	if (r < 0)
 		util_fatal("Failed to write to %s: %m", opt_output);
 	if (fd != 1)
 		close(fd);
 }
+
+
+static void decrypt_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
+		CK_OBJECT_HANDLE key)
+{
+	unsigned char	in_buffer[1024], out_buffer[1024];
+	CK_MECHANISM	mech;
+	CK_RV		rv;
+	CK_RSA_PKCS_OAEP_PARAMS oaep_params;
+	CK_ULONG	in_len, out_len;
+	int		fd, r;
+
+	if (!opt_mechanism_used)
+		if (!find_mechanism(slot, CKF_DECRYPT|CKF_HW, NULL, 0, &opt_mechanism))
+			util_fatal("Decrypt mechanism not supported");
+
+	fprintf(stderr, "Using decrypt algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
+	memset(&mech, 0, sizeof(mech));
+	mech.mechanism = opt_mechanism;
+	oaep_params.hashAlg = 0;
+
+	if (opt_hash_alg != 0 && opt_mechanism != CKM_RSA_PKCS_OAEP)
+		util_fatal("The hash-algorithm is applicable only to "
+               "RSA-PKCS-OAEP mechanism"); 
+
+	if (opt_input == NULL)
+		fd = 0;
+	else if ((fd = open(opt_input, O_RDONLY|O_BINARY)) < 0)
+		util_fatal("Cannot open %s: %m", opt_input);
+
+	r = read(fd, in_buffer, sizeof(in_buffer));
+	if (r < 0)
+		util_fatal("Cannot read from %s: %m", opt_input);
+	in_len = r;
+
+	/* set "default" MGF and hash algorithms. We can overwrite MGF later */
+	switch (opt_mechanism) {
+	case CKM_RSA_PKCS_OAEP:
+		oaep_params.hashAlg = opt_hash_alg;
+		switch (opt_hash_alg) {
+		case CKM_SHA224:
+			oaep_params.mgf = CKG_MGF1_SHA224;
+			break;
+		case CKM_SHA256:
+			oaep_params.mgf = CKG_MGF1_SHA256;
+			break;
+		case CKM_SHA384:
+			oaep_params.mgf = CKG_MGF1_SHA384;
+			break;
+		case CKM_SHA512:
+			oaep_params.mgf = CKG_MGF1_SHA512;
+			break;
+		default: 
+			oaep_params.hashAlg = CKM_SHA_1;
+			/* fall through */
+		case CKM_SHA_1:
+			oaep_params.mgf = CKG_MGF1_SHA1;
+			break;
+		}
+		break;
+	case CKM_RSA_PKCS:
+		mech.pParameter = NULL;
+		mech.ulParameterLen = 0;
+		break;
+	default:
+		util_fatal("Mechanism %s illegal or not supported\n", p11_mechanism_to_name(opt_mechanism));
+	}
+
+
+	/* If an RSA-OAEP mechanism, it needs parameters */
+	if (oaep_params.hashAlg) {
+		if (opt_mgf != 0)
+			oaep_params.mgf = opt_mgf;
+
+		/* These settings are compatible with OpenSSL 1.0.2L and 1.1.0+ */
+		oaep_params.source = 0UL;  /* empty encoding parameter (label) */
+		oaep_params.pSourceData = NULL; /* PKCS#11 standard: this must be NULLPTR */
+		oaep_params.ulSourceDataLen = 0; /* PKCS#11 standard: this must be 0 */
+
+		mech.pParameter = &oaep_params;
+		mech.ulParameterLen = sizeof(oaep_params);
+
+		fprintf(stderr, "OAEP parameters: hashAlg=%s, mgf=%s, source_type=%lu, source_ptr=%p, source_len=%lu\n",
+			p11_mechanism_to_name(oaep_params.hashAlg),
+			p11_mgf_to_name(oaep_params.mgf),
+			oaep_params.source,
+			oaep_params.pSourceData,
+			oaep_params.ulSourceDataLen);
+
+	} 
+
+	rv = p11->C_DecryptInit(session, &mech, key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DecryptInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, key))
+		login(session,CKU_CONTEXT_SPECIFIC);
+
+	out_len = sizeof(out_buffer);
+	rv = p11->C_Decrypt(session, in_buffer, in_len, out_buffer, &out_len);
+	if (rv != CKR_OK)
+		p11_fatal("C_Decrypt", rv);
+
+	if (fd != 0)
+		close(fd);
+
+	if (opt_output == NULL)   {
+		fd = 1;
+	}
+	else  {
+		fd = open(opt_output, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, S_IRUSR|S_IWUSR);
+		if (fd < 0)
+			util_fatal("failed to open %s: %m", opt_output);
+	}
+
+	r = write(fd, out_buffer, out_len);
+	if (r < 0)
+		util_fatal("Failed to write to %s: %m", opt_output);
+	if (fd != 1)
+		close(fd);
+}
+
 
 static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 {
@@ -1444,9 +1986,9 @@ static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 
 	if (!opt_mechanism_used)
 		if (!find_mechanism(slot, CKF_DIGEST, NULL, 0, &opt_mechanism))
-			util_fatal("Digest mechanism is not supported\n");
+			util_fatal("Digest mechanism is not supported");
 
-	printf("Using digest algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
+	fprintf(stderr, "Using digest algorithm %s\n", p11_mechanism_to_name(opt_mechanism));
 	memset(&mech, 0, sizeof(mech));
 	mech.mechanism = opt_mechanism;
 
@@ -1456,7 +1998,7 @@ static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 
 	if (opt_input == NULL)
 		fd = 0;
-	else if ((fd = open(opt_input, O_RDONLY)) < 0)
+	else if ((fd = open(opt_input, O_RDONLY|O_BINARY)) < 0)
 		util_fatal("Cannot open %s: %m", opt_input);
 
 	while ((r = read(fd, buffer, sizeof(buffer))) > 0) {
@@ -1487,42 +2029,42 @@ static void hash_data(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 
 #define FILL_ATTR(attr, typ, val, len) {(attr).type=(typ); (attr).pValue=(val); (attr).ulValueLen=len;}
 
-static int gen_keypair(CK_SESSION_HANDLE session,
+static int gen_keypair(CK_SLOT_ID slot, CK_SESSION_HANDLE session,
 	CK_OBJECT_HANDLE *hPublicKey, CK_OBJECT_HANDLE *hPrivateKey, const char *type)
 {
 	CK_MECHANISM mechanism = {CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0};
 	CK_ULONG modulusBits = 1024;
 	CK_BYTE publicExponent[] = { 0x01, 0x00, 0x01 }; /* 65537 in bytes */
 	CK_BBOOL _true = TRUE;
+	CK_BBOOL _false = FALSE;
 	CK_OBJECT_CLASS pubkey_class = CKO_PUBLIC_KEY;
 	CK_OBJECT_CLASS privkey_class = CKO_PRIVATE_KEY;
 	CK_ATTRIBUTE publicKeyTemplate[20] = {
 		{CKA_CLASS, &pubkey_class, sizeof(pubkey_class)},
 		{CKA_TOKEN, &_true, sizeof(_true)},
-		{CKA_ENCRYPT, &_true, sizeof(_true)},
-		{CKA_VERIFY, &_true, sizeof(_true)},
-		{CKA_WRAP, &_true, sizeof(_true)},
 	};
-	int n_pubkey_attr = 5;
+	int n_pubkey_attr = 2;
 	CK_ATTRIBUTE privateKeyTemplate[20] = {
 		{CKA_CLASS, &privkey_class, sizeof(privkey_class)},
 		{CKA_TOKEN, &_true, sizeof(_true)},
 		{CKA_PRIVATE, &_true, sizeof(_true)},
 		{CKA_SENSITIVE, &_true, sizeof(_true)},
-		{CKA_DECRYPT, &_true, sizeof(_true)},
-		{CKA_SIGN, &_true, sizeof(_true)},
-		{CKA_UNWRAP, &_true, sizeof(_true)}
 	};
-	int n_privkey_attr = 7;
+	int n_privkey_attr = 4;
 	unsigned char *ecparams = NULL;
 	size_t ecparams_size;
 	CK_RV rv;
 
 	if (type != NULL) {
-		if (strncmp(type, "RSA:", strlen("RSA:")) == 0 ||
-		    strncmp(type, "rsa:", strlen("rsa:")) == 0) {
+		if (strncmp(type, "RSA:", strlen("RSA:")) == 0 || strncmp(type, "rsa:", strlen("rsa:")) == 0) {
+			CK_MECHANISM_TYPE mtypes[] = {CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_X9_31_KEY_PAIR_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
 			CK_ULONG    key_length;
 			const char *size = type + strlen("RSA:");
+
+			if (!opt_mechanism_used)
+				if (!find_mechanism(slot, CKF_GENERATE_KEY_PAIR, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate RSA mechanism not supported");
 
 			if (size == NULL)
 				util_fatal("Unknown key type %s", type);
@@ -1535,10 +2077,33 @@ static int gen_keypair(CK_SESSION_HANDLE session,
 			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_PUBLIC_EXPONENT, publicExponent, sizeof(publicExponent));
 			n_pubkey_attr++;
 
-			mechanism.mechanism = CKM_RSA_PKCS_KEY_PAIR_GEN;
+			if (opt_key_usage_default || opt_key_usage_sign) {
+				FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_VERIFY, &_true, sizeof(_true));
+				n_pubkey_attr++;
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_SIGN, &_true, sizeof(_true));
+				n_privkey_attr++;
+			}
+
+			if (opt_key_usage_default || opt_key_usage_decrypt) {
+				FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_ENCRYPT, &_true, sizeof(_true));
+				n_pubkey_attr++;
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_DECRYPT, &_true, sizeof(_true));
+				n_privkey_attr++;
+			}
+
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_WRAP, &_true, sizeof(_true));
+			n_pubkey_attr++;
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_UNWRAP, &_true, sizeof(_true));
+			n_privkey_attr++;
 		}
 		else if (!strncmp(type, "EC:", 3))   {
+			CK_MECHANISM_TYPE mtypes[] = {CKM_EC_KEY_PAIR_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
 			int ii;
+
+			if (!opt_mechanism_used)
+				if (!find_mechanism(slot, CKF_GENERATE_KEY_PAIR, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate EC key mechanism not supported\n");
 
 			for (ii=0; ec_curve_infos[ii].name; ii++)   {
 				if (!strcmp(ec_curve_infos[ii].name, type + 3))
@@ -1554,18 +2119,95 @@ static int gen_keypair(CK_SESSION_HANDLE session,
 			if (!ecparams)
 				util_fatal("Allocation error", 0);
 			if (!hex_to_bin(ec_curve_infos[ii].oid_encoded, ecparams, &ecparams_size)) {
-				printf("Cannot convert \"%s\"\n", ec_curve_infos[ii].oid_encoded);
+				fprintf(stderr, "Cannot convert \"%s\"\n", ec_curve_infos[ii].oid_encoded);
 				util_print_usage_and_die(app_name, options, option_help, NULL);
+			}
+
+			if (opt_key_usage_default || opt_key_usage_sign) {
+				FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_VERIFY, &_true, sizeof(_true));
+				n_pubkey_attr++;
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_SIGN, &_true, sizeof(_true));
+				n_privkey_attr++;
+			}
+
+			if (opt_key_usage_default || opt_key_usage_derive) {
+				FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+				n_pubkey_attr++;
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+				n_privkey_attr++;
 			}
 
 			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_EC_PARAMS, ecparams, ecparams_size);
 			n_pubkey_attr++;
+		}
+		else if (strncmp(type, "GOSTR3410:", strlen("GOSTR3410:")) == 0 || strncmp(type, "gostr3410:", strlen("gostr3410:")) == 0) {
+			CK_BYTE key_paramset_encoded_oid[9];
+			CK_BYTE hash_paramset_encoded_oid[9];
+			const CK_BYTE GOST_PARAMSET_A_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x01};
+			const CK_BYTE GOST_PARAMSET_B_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x02};
+			const CK_BYTE GOST_PARAMSET_C_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x23, 0x03};
+			const CK_BYTE GOST_HASH_PARAMSET_OID[] = {0x06, 0x07, 0x2a, 0x85, 0x03, 0x02, 0x02, 0x1e, 0x01};
+			unsigned long int  gost_key_type = CKK_GOSTR3410;
+			CK_MECHANISM_TYPE mtypes[] = {CKM_GOSTR3410_KEY_PAIR_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
+			const char *p_param_set = type + strlen("GOSTR3410:");
 
-			mechanism.mechanism = CKM_EC_KEY_PAIR_GEN;
+			if (!opt_mechanism_used) {
+				if (!find_mechanism(slot, CKF_GENERATE_KEY_PAIR, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate GOSTR3410 mechanism not supported");
+			}
+
+			if (p_param_set == NULL)
+				util_fatal("Unknown key type %s", type);
+
+			if (!strcmp("A", p_param_set)) {
+				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_A_OID, sizeof(GOST_PARAMSET_A_OID));
+				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			}
+			else if (!strcmp("B", p_param_set)) {
+				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_B_OID, sizeof(GOST_PARAMSET_B_OID));
+				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			}
+			else if (!strcmp("C", p_param_set)) {
+				memcpy(key_paramset_encoded_oid, GOST_PARAMSET_C_OID, sizeof(GOST_PARAMSET_C_OID));
+				memcpy(hash_paramset_encoded_oid, GOST_HASH_PARAMSET_OID, sizeof(GOST_HASH_PARAMSET_OID));
+			}
+			else
+				util_fatal("Unknown key type %s, valid key types for mechanism GOSTR3410 are GOSTR3410:A, GOSTR3410:B, GOSTR3410:C", type);
+
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid, sizeof(key_paramset_encoded_oid));
+			n_pubkey_attr++;
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3410_PARAMS, key_paramset_encoded_oid, sizeof(key_paramset_encoded_oid));
+			n_privkey_attr++;
+
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
+			n_pubkey_attr++;
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_GOSTR3411_PARAMS, hash_paramset_encoded_oid, sizeof(hash_paramset_encoded_oid));
+			n_privkey_attr++;
+
+			FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_KEY_TYPE, &gost_key_type, sizeof(gost_key_type));
+			n_pubkey_attr++;
+			FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_KEY_TYPE, &gost_key_type, sizeof(gost_key_type));
+			n_privkey_attr++;
+
+			if (opt_key_usage_default || opt_key_usage_sign) {
+				FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_VERIFY, &_true, sizeof(_true));
+				n_pubkey_attr++;
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_SIGN, &_true, sizeof(_true));
+				n_privkey_attr++;
+			}
+
+			/* do not set 'derive' attribute unless it is specified directly */
+			if (opt_key_usage_derive) {
+				FILL_ATTR(privateKeyTemplate[n_privkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+				n_privkey_attr++;
+			}
 		}
 		else {
 			util_fatal("Unknown key type %s", type);
 		}
+
+		mechanism.mechanism = opt_mechanism;
 	}
 
 	if (opt_object_label != NULL) {
@@ -1586,6 +2228,17 @@ static int gen_keypair(CK_SESSION_HANDLE session,
 		n_privkey_attr++;
 	}
 
+	if (opt_is_private != 0) {
+		FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_PRIVATE,
+			&_true, sizeof(_true));
+		n_pubkey_attr++;
+	}
+	else {
+		FILL_ATTR(publicKeyTemplate[n_pubkey_attr], CKA_PRIVATE,
+			&_false, sizeof(_false));
+		n_pubkey_attr++;
+	}
+
 	rv = p11->C_GenerateKeyPair(session, &mechanism,
 		publicKeyTemplate, n_pubkey_attr,
 		privateKeyTemplate, n_privkey_attr,
@@ -1603,66 +2256,220 @@ static int gen_keypair(CK_SESSION_HANDLE session,
 	return 1;
 }
 
+static int
+gen_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE *hSecretKey,
+	const char *type, char *label)
+{
+	CK_MECHANISM mechanism = {CKM_AES_KEY_GEN, NULL_PTR, 0};
+	CK_OBJECT_CLASS secret_key_class = CKO_SECRET_KEY;
+	CK_BBOOL _true = TRUE;
+	CK_BBOOL _false = FALSE;
+	CK_KEY_TYPE key_type = CKK_AES;
+	CK_ULONG    key_length;
+	CK_ATTRIBUTE keyTemplate[20] = {
+		{CKA_CLASS, &secret_key_class, sizeof(secret_key_class)},
+		{CKA_TOKEN, &_true, sizeof(_true)},
+	};
+	int n_attr = 2;
+	CK_RV rv;
+
+	if (type != NULL) {
+		if (strncmp(type, "AES:", strlen("AES:")) == 0 || strncmp(type, "aes:", strlen("aes:")) == 0) {
+			CK_MECHANISM_TYPE mtypes[] = {CKM_AES_KEY_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
+			const char *size = type + strlen("AES:");
+
+			key_type = CKK_AES;
+
+			if (!opt_mechanism_used)
+				if (!find_mechanism(slot, CKF_GENERATE, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate Key mechanism not supported\n");
+
+			if (size == NULL)
+				util_fatal("Unknown key type %s", type);
+			key_length = (unsigned long)atol(size);
+			if (key_length == 0)
+				key_length = 32;
+
+			FILL_ATTR(keyTemplate[n_attr], CKA_KEY_TYPE, &key_type, sizeof(key_type));
+			n_attr++;
+		}
+		else if (strncmp(type, "DES:", strlen("DES:")) == 0 || strncmp(type, "des:", strlen("des:")) == 0) {
+			CK_MECHANISM_TYPE mtypes[] = {CKM_DES_KEY_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
+			const char *size = type + strlen("DES:");
+
+			key_type = CKK_DES;
+
+			if (!opt_mechanism_used)
+				if (!find_mechanism(slot, CKF_GENERATE, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate Key mechanism not supported\n");
+
+			if (size == NULL)
+				util_fatal("Unknown key type %s", type);
+			key_length = (unsigned long)atol(size);
+			if (key_length == 0)
+				key_length = 8;
+
+			FILL_ATTR(keyTemplate[n_attr], CKA_KEY_TYPE, &key_type, sizeof(key_type));
+			n_attr++;
+		}
+		else if (strncmp(type, "DES3:", strlen("DES3:")) == 0 || strncmp(type, "des3:", strlen("des3:")) == 0) {
+			CK_MECHANISM_TYPE mtypes[] = {CKM_DES3_KEY_GEN};
+			size_t mtypes_num = sizeof(mtypes)/sizeof(mtypes[0]);
+			const char *size = type + strlen("DES3:");
+
+			key_type = CKK_DES3;
+
+			if (!opt_mechanism_used)
+				if (!find_mechanism(slot, CKF_GENERATE, mtypes, mtypes_num, &opt_mechanism))
+					util_fatal("Generate Key mechanism not supported\n");
+
+			if (size == NULL)
+				util_fatal("Unknown key type %s", type);
+			key_length = (unsigned long)atol(size);
+			if (key_length == 0)
+				key_length = 16;
+
+			FILL_ATTR(keyTemplate[n_attr], CKA_KEY_TYPE, &key_type, sizeof(key_type));
+			n_attr++;
+		}
+		else {
+			util_fatal("Unknown key type %s", type);
+		}
+
+		if (opt_is_sensitive != 0) {
+			FILL_ATTR(keyTemplate[n_attr], CKA_SENSITIVE, &_true, sizeof(_true));
+			n_attr++;
+		}
+		else {
+			FILL_ATTR(keyTemplate[n_attr], CKA_SENSITIVE, &_false, sizeof(_false));
+			n_attr++;
+		}
+
+		FILL_ATTR(keyTemplate[n_attr], CKA_ENCRYPT, &_true, sizeof(_true));
+		n_attr++;
+		FILL_ATTR(keyTemplate[n_attr], CKA_DECRYPT, &_true, sizeof(_true));
+		n_attr++;
+		FILL_ATTR(keyTemplate[n_attr], CKA_WRAP, &_true, sizeof(_true));
+		n_attr++;
+		FILL_ATTR(keyTemplate[n_attr], CKA_UNWRAP, &_true, sizeof(_true));
+		n_attr++;
+		FILL_ATTR(keyTemplate[n_attr], CKA_VALUE_LEN, &key_length, sizeof(key_length));
+		n_attr++;
+
+		mechanism.mechanism = opt_mechanism;
+	}
+
+	if (label != NULL) {
+		FILL_ATTR(keyTemplate[n_attr], CKA_LABEL, label, strlen(label));
+		n_attr++;
+	}
+	else if (opt_object_label != NULL) {
+		FILL_ATTR(keyTemplate[n_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
+		n_attr++;
+	}
+
+	if (opt_object_id_len != 0) {
+		FILL_ATTR(keyTemplate[n_attr], CKA_ID, opt_object_id, opt_object_id_len);
+		n_attr++;
+	}
+
+	rv = p11->C_GenerateKey(session, &mechanism, keyTemplate, n_attr, hSecretKey);
+	if (rv != CKR_OK)
+		p11_fatal("C_GenerateKey", rv);
+
+	printf("Key generated:\n");
+	show_object(session, *hSecretKey);
+	return 1;
+}
+
+
 #ifdef ENABLE_OPENSSL
 static void	parse_certificate(struct x509cert_info *cert,
-		unsigned char *data, int len)
+		unsigned char *data, int len, unsigned char *contents,
+		int *contents_len)
 {
-	X509 *x;
+	X509 *x = NULL;
 	unsigned char *p;
-	const unsigned char *pp;
 	int n;
 
-	pp = data;
-	x = d2i_X509(NULL, &pp, len);
+	if (strstr((char *)data, "-----BEGIN CERTIFICATE-----")) {
+		BIO *mem = BIO_new_mem_buf(data, len);
+		x = PEM_read_bio_X509(mem, NULL, NULL, NULL);
+		/* Update what is written to the card to be DER encoded */
+		if (contents != NULL) {
+			unsigned char *contents_pointer = contents;
+			*contents_len = i2d_X509(x, &contents_pointer);
+			if (*contents_len < 0)
+				util_fatal("Failed to convert PEM to DER");
+		}
+		BIO_free(mem);
+	} else {
+		x = d2i_X509(NULL, (const unsigned char **)&data, len);
+	}
 	if (!x) {
 		util_fatal("OpenSSL error during X509 certificate parsing");
 	}
-	p = cert->subject;
-	n = i2d_X509_NAME(x->cert_info->subject, &p);
+	/* convert only (if needed) */
+	if (cert == NULL)
+		return;
+
+	/* check length first */
+	n = i2d_X509_NAME(X509_get_subject_name(x), NULL);
 	if (n < 0)
 		util_fatal("OpenSSL error while encoding subject name");
 	if (n > (int)sizeof (cert->subject))
 		util_fatal("subject name too long");
+	/* green light, actually do it */
+	p = cert->subject;
+	n = i2d_X509_NAME(X509_get_subject_name(x), &p);
 	cert->subject_len = n;
 
-	p = cert->issuer;
-	n = i2d_X509_NAME(x->cert_info->issuer, &p);
+	/* check length first */
+	n = i2d_X509_NAME(X509_get_issuer_name(x), NULL);
 	if (n < 0)
 		util_fatal("OpenSSL error while encoding issuer name");
 	if (n > (int)sizeof (cert->issuer))
 		util_fatal("issuer name too long");
+	/* green light, actually do it */
+	p = cert->issuer;
+	n =i2d_X509_NAME(X509_get_issuer_name(x), &p);
 	cert->issuer_len = n;
 
-	p = cert->serialnum;
-	n = i2d_ASN1_INTEGER(x->cert_info->serialNumber, &p);
+	/* check length first */
+	n = i2d_ASN1_INTEGER(X509_get_serialNumber(x), NULL);
 	if (n < 0)
 		util_fatal("OpenSSL error while encoding serial number");
 	if (n > (int)sizeof (cert->serialnum))
 		util_fatal("serial number too long");
+	/* green light, actually do it */
+	p = cert->serialnum;
+	n = i2d_ASN1_INTEGER(X509_get_serialNumber(x), &p);
 	cert->serialnum_len = n;
 }
 
 static int
-do_read_private_key(unsigned char *data, size_t data_len, EVP_PKEY **key)
+do_read_key(unsigned char *data, size_t data_len, int private, EVP_PKEY **key)
 {
-	BIO	*mem;
-	BUF_MEM buf_mem;
+	BIO *mem = BIO_new_mem_buf(data, data_len);;
 
 	if (!key)
 		return -1;
-	buf_mem.data = malloc(data_len);
-        if (!buf_mem.data)
-		return -1;
 
-        memcpy(buf_mem.data, data, data_len);
-        buf_mem.max = buf_mem.length = data_len;
+	if (private) {
+		if (!strstr((char *)data, "-----BEGIN "))
+			*key = d2i_PrivateKey_bio(mem, NULL);
+		else
+			*key = PEM_read_bio_PrivateKey(mem, NULL, NULL, NULL);
+	}
+	else {
+		if (!strstr((char *)data, "-----BEGIN "))
+			*key = d2i_PUBKEY_bio(mem, NULL);
+		else
+			*key = PEM_read_bio_PUBKEY(mem, NULL, NULL, NULL);
+	}
 
-	mem = BIO_new(BIO_s_mem());
-	BIO_set_mem_buf(mem, &buf_mem, BIO_NOCLOSE);
-	if (!strstr((char *)data, "-----BEGIN PRIVATE KEY-----"))
-		*key = d2i_PrivateKey_bio(mem, NULL);
-	else
-		*key = PEM_read_bio_PrivateKey(mem, NULL, NULL, NULL);
 	BIO_free(mem);
 	if (*key == NULL)
 		return -1;
@@ -1670,69 +2477,73 @@ do_read_private_key(unsigned char *data, size_t data_len, EVP_PKEY **key)
 	return 0;
 }
 
-#define RSA_GET_BN(LOCALNAME, BNVALUE) \
+#define RSA_GET_BN(RSA, LOCALNAME, BNVALUE) \
 	do { \
-		rsa->LOCALNAME = malloc(BN_num_bytes(BNVALUE)); \
-		if (!rsa->LOCALNAME) \
-			util_fatal("malloc() failure\n"); \
-		rsa->LOCALNAME##_len = BN_bn2bin(BNVALUE, rsa->LOCALNAME); \
+		if (BNVALUE) { \
+			RSA->LOCALNAME = malloc(BN_num_bytes(BNVALUE)); \
+			if (!RSA->LOCALNAME) \
+				util_fatal("malloc() failure\n"); \
+			RSA->LOCALNAME##_len = BN_bn2bin(BNVALUE, RSA->LOCALNAME); \
+		} else { \
+			RSA->LOCALNAME##_len = 0; \
+			RSA->LOCALNAME = NULL; \
+		} \
 	} while (0)
 
 static int
-parse_rsa_private_key(struct rsakey_info *rsa, unsigned char *data, int len)
+parse_rsa_pkey(EVP_PKEY *pkey, int private, struct rsakey_info *rsa)
 {
-	RSA *r = NULL;
-	const unsigned char *p;
+	RSA *r;
+	const BIGNUM *r_n, *r_e, *r_d;
+	const BIGNUM *r_p, *r_q;
+	const BIGNUM *r_dmp1, *r_dmq1, *r_iqmp;
 
-	p = data;
-	r = d2i_RSAPrivateKey(NULL, &p, len);
+	r = EVP_PKEY_get1_RSA(pkey);
 	if (!r) {
-		util_fatal("OpenSSL error during RSA private key parsing");
+		if (private)
+			util_fatal("OpenSSL error during RSA private key parsing");
+		else
+			util_fatal("OpenSSL error during RSA public key parsing");
 	}
-	RSA_GET_BN(modulus, r->n);
-	RSA_GET_BN(public_exponent, r->e);
-	RSA_GET_BN(private_exponent, r->d);
-	RSA_GET_BN(prime_1, r->p);
-	RSA_GET_BN(prime_2, r->q);
-	RSA_GET_BN(exponent_1, r->dmp1);
-	RSA_GET_BN(exponent_2, r->dmq1);
-	RSA_GET_BN(coefficient, r->iqmp);
+
+	RSA_get0_key(r, &r_n, &r_e, NULL);
+	RSA_GET_BN(rsa, modulus, r_n);
+	RSA_GET_BN(rsa, public_exponent, r_e);
+
+	if (private) {
+		RSA_get0_key(r, NULL, NULL, &r_d);
+		RSA_GET_BN(rsa, private_exponent, r_d);
+
+		RSA_get0_factors(r, &r_p, &r_q);
+		RSA_GET_BN(rsa, prime_1, r_p);
+		RSA_GET_BN(rsa, prime_2, r_q);
+
+		RSA_get0_crt_params(r, &r_dmp1, &r_dmq1, &r_iqmp);
+		RSA_GET_BN(rsa, exponent_1, r_dmp1);
+		RSA_GET_BN(rsa, exponent_2, r_dmq1);
+		RSA_GET_BN(rsa, coefficient, r_iqmp);
+	}
+
+	RSA_free(r);
 
 	return 0;
 }
 
-static void parse_rsa_public_key(struct rsakey_info *rsa,
-		unsigned char *data, int len)
-{
-	RSA *r = NULL;
-	const unsigned char *p;
-
-	p = data;
-	r = d2i_RSA_PUBKEY(NULL, &p, len);
-
-	if (!r) {
-		r = d2i_RSAPublicKey(NULL, &p, len);
-	}
-
-	if (!r) {
-		util_fatal("OpenSSL error during RSA public key parsing");
-	}
-	RSA_GET_BN(modulus, r->n);
-	RSA_GET_BN(public_exponent, r->e);
-}
-
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
-static int parse_gost_private_key(EVP_PKEY *evp_key, struct gostkey_info *gost)
+static int
+parse_gost_pkey(EVP_PKEY *pkey, int private, struct gostkey_info *gost)
 {
-	EC_KEY *src = EVP_PKEY_get0(evp_key);
+	EC_KEY *src = EVP_PKEY_get0(pkey);
 	unsigned char *pder;
 	const BIGNUM *bignum;
+	BIGNUM *X, *Y;
+	const EC_POINT *point;
 	int nid, rv;
 
 	if (!src)
 		return -1;
 
-	nid = EC_GROUP_get_curve_name(EC_KEY_get0_group(EVP_PKEY_get0(evp_key)));
+	nid = EC_GROUP_get_curve_name(EC_KEY_get0_group(EVP_PKEY_get0(pkey)));
 	rv = i2d_ASN1_OBJECT(OBJ_nid2obj(nid), NULL);
 	if (rv < 0)
 		return -1;
@@ -1745,13 +2556,87 @@ static int parse_gost_private_key(EVP_PKEY *evp_key, struct gostkey_info *gost)
 	rv = i2d_ASN1_OBJECT(OBJ_nid2obj(nid), &pder);
 	gost->param_oid.len = rv;
 
-	bignum = EC_KEY_get0_private_key(EVP_PKEY_get0(evp_key));
+	if (private) {
+		bignum = EC_KEY_get0_private_key(EVP_PKEY_get0(pkey));
 
-	gost->private.len = BN_num_bytes(bignum);
-	gost->private.value = malloc(gost->private.len);
-	if (!gost->private.value)
+		gost->private.len = BN_num_bytes(bignum);
+		gost->private.value = malloc(gost->private.len);
+		if (!gost->private.value)
+			return -1;
+		BN_bn2bin(bignum, gost->private.value);
+	}
+	else {
+		X = BN_new();
+		Y = BN_new();
+		point = EC_KEY_get0_public_key(src);
+		rv = -1;
+		if (X && Y && point && EC_KEY_get0_group(src))
+			rv = EC_POINT_get_affine_coordinates_GFp(EC_KEY_get0_group(src),
+					point, X, Y, NULL);
+		if (rv == 1) {
+			gost->public.len = BN_num_bytes(X) + BN_num_bytes(Y);
+			gost->public.value = malloc(gost->public.len);
+			if (!gost->public.value)
+				rv = -1;
+			else
+			{
+				BN_bn2bin(Y, gost->public.value);
+				BN_bn2bin(X, gost->public.value + BN_num_bytes(Y));
+			}
+		}
+		BN_free(X);
+		BN_free(Y);
+		if (rv != 1)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
+parse_ec_pkey(EVP_PKEY *pkey, int private, struct gostkey_info *gost)
+{
+	EC_KEY *src = EVP_PKEY_get0(pkey);
+	const BIGNUM *bignum;
+
+	if (!src)
 		return -1;
-	BN_bn2bin(bignum, gost->private.value);
+
+	gost->param_oid.len = i2d_ECParameters(src, &gost->param_oid.value);
+	if (gost->param_oid.len <= 0)
+		return -1;
+
+	if (private) {
+		bignum = EC_KEY_get0_private_key(EVP_PKEY_get0(pkey));
+
+		gost->private.len = BN_num_bytes(bignum);
+		gost->private.value = malloc(gost->private.len);
+		if (!gost->private.value)
+			return -1;
+		BN_bn2bin(bignum, gost->private.value);
+	}
+	else {
+		unsigned char buf[512], *point;
+		int point_len, header_len;
+		const int MAX_HEADER_LEN = 3;
+		const EC_GROUP *ecgroup = EC_KEY_get0_group(src);
+		const EC_POINT *ecpoint = EC_KEY_get0_public_key(src);
+		if (!ecgroup || !ecpoint)
+			return -1;
+		point_len = EC_POINT_point2oct(ecgroup, ecpoint, POINT_CONVERSION_UNCOMPRESSED, buf, sizeof(buf), NULL);
+		gost->public.value = malloc(MAX_HEADER_LEN+point_len);
+		if (!gost->public.value)
+			return -1;
+		point = gost->public.value;
+		ASN1_put_object(&point, 0, point_len, V_ASN1_OCTET_STRING, V_ASN1_UNIVERSAL);
+		header_len = point-gost->public.value;
+		memcpy(point, buf, point_len);
+		gost->public.len = header_len+point_len;
+#ifndef EC_POINT_NO_ASN1_OCTET_STRING // workaround for non-compliant cards not expecting DER encoding
+		gost->public.len   -= header_len;
+		gost->public.value += header_len;
+#endif
+	}
 
 	return 0;
 }
@@ -1761,11 +2646,11 @@ static int parse_gost_private_key(EVP_PKEY *evp_key, struct gostkey_info *gost)
 #define MAX_OBJECT_SIZE	5000
 
 /* Currently for certificates (-type cert), private keys (-type privkey),
-   public keys (-type pubkey) and data objects (-type data).
-   Note: only RSA private keys are supported. */
+   public keys (-type pubkey) and data objects (-type data). */
 static int write_object(CK_SESSION_HANDLE session)
 {
 	CK_BBOOL _true = TRUE;
+	CK_BBOOL _false = FALSE;
 	unsigned char contents[MAX_OBJECT_SIZE + 1];
 	int contents_len = 0;
 	unsigned char certdata[MAX_OBJECT_SIZE];
@@ -1778,12 +2663,15 @@ static int write_object(CK_SESSION_HANDLE session)
 	CK_RV rv;
 	int need_to_parse_certdata = 0;
 	unsigned char *oid_buf = NULL;
+	CK_OBJECT_CLASS clazz;
+	CK_CERTIFICATE_TYPE cert_type;
 #ifdef ENABLE_OPENSSL
+	CK_KEY_TYPE type = CKK_RSA;
 	struct x509cert_info cert;
 	struct rsakey_info rsa;
 	struct gostkey_info gost;
 	EVP_PKEY *evp_key = NULL;
-	CK_KEY_TYPE type = CKK_RSA;
+	int pk_type;
 
 	memset(&cert, 0, sizeof(cert));
 	memset(&rsa,  0, sizeof(rsa));
@@ -1795,105 +2683,119 @@ static int write_object(CK_SESSION_HANDLE session)
 
 	f = fopen(opt_file_to_write, "rb");
 	if (f == NULL)
-		util_fatal("Couldn't open file \"%s\"\n", opt_file_to_write);
+		util_fatal("Couldn't open file \"%s\"", opt_file_to_write);
 	contents_len = fread(contents, 1, sizeof(contents) - 1, f);
 	if (contents_len < 0)
-		util_fatal("Couldn't read from file \"%s\"\n", opt_file_to_write);
+		util_fatal("Couldn't read from file \"%s\"", opt_file_to_write);
 	fclose(f);
 	contents[contents_len] = '\0';
 
 	if (opt_attr_from_file) {
 		if (!(f = fopen(opt_attr_from_file, "rb")))
-			util_fatal("Couldn't open file \"%s\"\n", opt_attr_from_file);
+			util_fatal("Couldn't open file \"%s\"", opt_attr_from_file);
 		certdata_len = fread(certdata, 1, sizeof(certdata), f);
 		if (certdata_len < 0)
-			util_fatal("Couldn't read from file \"%s\"\n", opt_attr_from_file);
+			util_fatal("Couldn't read from file \"%s\"", opt_attr_from_file);
 		fclose(f);
 		need_to_parse_certdata = 1;
 	}
-	if (opt_object_class == CKO_CERTIFICATE && !opt_attr_from_file) {
-		memcpy(certdata, contents, MAX_OBJECT_SIZE);
-		certdata_len = contents_len;
-		need_to_parse_certdata = 1;
+	if (opt_object_class == CKO_CERTIFICATE) {
+		if (opt_attr_from_file) {
+			/* Convert  contents  from PEM to DER if needed
+			 * certdata  already read and will be validated later
+			 */
+#ifdef ENABLE_OPENSSL
+			parse_certificate(NULL, contents, contents_len, contents, &contents_len);
+#else
+			util_fatal("No OpenSSL support, cannot parse certificate");
+#endif
+		} else {
+			memcpy(certdata, contents, MAX_OBJECT_SIZE);
+			certdata_len = contents_len;
+			need_to_parse_certdata = 1;
+		}
 	}
 
 	if (need_to_parse_certdata) {
 #ifdef ENABLE_OPENSSL
-		parse_certificate(&cert, certdata, certdata_len);
+		/* Validate and get the certificate fields (from certdata)
+		 * and convert PEM to DER if needed
+		 */
+		parse_certificate(&cert, certdata, certdata_len,
+			(opt_attr_from_file ? NULL : contents), &contents_len);
 #else
-		util_fatal("No OpenSSL support, cannot parse certificate\n");
+		util_fatal("No OpenSSL support, cannot parse certificate");
 #endif
 	}
-	if (opt_object_class == CKO_PRIVATE_KEY) {
+	if (opt_object_class == CKO_PRIVATE_KEY || opt_object_class == CKO_PUBLIC_KEY) {
 #ifdef ENABLE_OPENSSL
+		int is_private = opt_object_class == CKO_PRIVATE_KEY;
 		int rv;
 
-		rv = do_read_private_key(contents, contents_len, &evp_key);
-		if (rv)
-			util_fatal("Cannot read private key\n");
+		rv = do_read_key(contents, contents_len, is_private, &evp_key);
+		if (rv) {
+			if (is_private)
+				util_fatal("Cannot read private key");
+			else
+				util_fatal("Cannot read public key");
+		}
 
-		if (evp_key->type == EVP_PKEY_RSA)   {
-			rv = parse_rsa_private_key(&rsa, contents, contents_len);
+		pk_type = EVP_PKEY_base_id(evp_key);
+
+		if (pk_type == EVP_PKEY_RSA)   {
+			rv = parse_rsa_pkey(evp_key, is_private, &rsa);
 		}
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
-		else if (evp_key->type == NID_id_GostR3410_2001)   {
-			rv = parse_gost_private_key(evp_key, &gost);
+		else if (pk_type == NID_id_GostR3410_2001)   {
+			rv = parse_gost_pkey(evp_key, is_private, &gost);
+			type = CKK_GOSTR3410;
+		} else if (pk_type == EVP_PKEY_EC) {
+			rv = parse_ec_pkey(evp_key, is_private, &gost);
+			type = CKK_EC;
 		}
 #endif
-		else   {
-			util_fatal("Unsupported key type: 0x%X\n", evp_key->type);
-		}
+		else
+			util_fatal("Unsupported key type: 0x%X", pk_type);
 
 		if (rv)
-			util_fatal("Cannot parse private key\n");
+			util_fatal("Cannot parse key");
 #else
-		util_fatal("No OpenSSL support, cannot parse private key\n");
-#endif
-	}
-	if (opt_object_class == CKO_PUBLIC_KEY) {
-#ifdef ENABLE_OPENSSL
-		parse_rsa_public_key(&rsa, contents, contents_len);
-#else
-		util_fatal("No OpenSSL support, cannot parse RSA public key\n");
+		util_fatal("No OpenSSL support, cannot parse key");
 #endif
 	}
 
 	if (opt_object_class == CKO_CERTIFICATE) {
-		CK_OBJECT_CLASS clazz = CKO_CERTIFICATE;
-		CK_CERTIFICATE_TYPE cert_type = CKC_X_509;
+		clazz = CKO_CERTIFICATE;
+		cert_type = CKC_X_509;
 
 		FILL_ATTR(cert_templ[0], CKA_TOKEN, &_true, sizeof(_true));
 		FILL_ATTR(cert_templ[1], CKA_VALUE, contents, contents_len);
 		FILL_ATTR(cert_templ[2], CKA_CLASS, &clazz, sizeof(clazz));
 		FILL_ATTR(cert_templ[3], CKA_CERTIFICATE_TYPE, &cert_type, sizeof(cert_type));
-		n_cert_attr = 4;
+		FILL_ATTR(cert_templ[4], CKA_PRIVATE, &_false, sizeof(_false));
+		n_cert_attr = 5;
 
 		if (opt_object_label != NULL) {
-			FILL_ATTR(cert_templ[n_cert_attr], CKA_LABEL,
-				opt_object_label, strlen(opt_object_label));
+			FILL_ATTR(cert_templ[n_cert_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
 			n_cert_attr++;
 		}
 		if (opt_object_id_len != 0) {
-			FILL_ATTR(cert_templ[n_cert_attr], CKA_ID,
-				opt_object_id, opt_object_id_len);
+			FILL_ATTR(cert_templ[n_cert_attr], CKA_ID, opt_object_id, opt_object_id_len);
 			n_cert_attr++;
 		}
 #ifdef ENABLE_OPENSSL
 		/* according to PKCS #11 CKA_SUBJECT MUST be specified */
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_SUBJECT,
-			cert.subject, cert.subject_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
 		n_cert_attr++;
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_ISSUER,
-			cert.issuer, cert.issuer_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_ISSUER, cert.issuer, cert.issuer_len);
 		n_cert_attr++;
-		FILL_ATTR(cert_templ[n_cert_attr], CKA_SERIAL_NUMBER,
-			cert.serialnum, cert.serialnum_len);
+		FILL_ATTR(cert_templ[n_cert_attr], CKA_SERIAL_NUMBER, cert.serialnum, cert.serialnum_len);
 		n_cert_attr++;
 #endif
 	}
 	else
 	if (opt_object_class == CKO_PRIVATE_KEY) {
-		CK_OBJECT_CLASS clazz = CKO_PRIVATE_KEY;
+		clazz = CKO_PRIVATE_KEY;
 
 		n_privkey_attr = 0;
 		FILL_ATTR(privkey_templ[n_privkey_attr], CKA_CLASS, &clazz, sizeof(clazz));
@@ -1913,12 +2815,28 @@ static int write_object(CK_SESSION_HANDLE session)
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_ID, opt_object_id, opt_object_id_len);
 			n_privkey_attr++;
 		}
+		if (opt_key_usage_sign != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_SIGN, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+		if (opt_key_usage_decrypt != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_DECRYPT, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+		if (opt_key_usage_derive != 0) {
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+			n_privkey_attr++;
+		}
+
 #ifdef ENABLE_OPENSSL
 		if (cert.subject_len != 0) {
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
 			n_privkey_attr++;
 		}
-		if (evp_key->type == EVP_PKEY_RSA)   {
+		pk_type = EVP_PKEY_base_id(evp_key);
+
+		if (pk_type == EVP_PKEY_RSA)   {
+			type = CKK_RSA;
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
 			n_privkey_attr++;
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_MODULUS, rsa.modulus, rsa.modulus_len);
@@ -1939,8 +2857,18 @@ static int write_object(CK_SESSION_HANDLE session)
 			n_privkey_attr++;
 		}
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
-		else if (evp_key->type == NID_id_GostR3410_2001)   {
-			CK_KEY_TYPE type = CKK_GOSTR3410;
+		else if (pk_type == EVP_PKEY_EC)   {
+			type = CKK_EC;
+
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
+			n_privkey_attr++;
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_EC_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_privkey_attr++;
+			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_VALUE, gost.private.value, gost.private.len);
+			n_privkey_attr++;
+		}
+		else if (pk_type == NID_id_GostR3410_2001)   {
+			type = CKK_GOSTR3410;
 
 			FILL_ATTR(privkey_templ[n_privkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
 			n_privkey_attr++;
@@ -1953,23 +2881,40 @@ static int write_object(CK_SESSION_HANDLE session)
 				return rv;
 			n_privkey_attr++;
 		}
+
 #endif
 #endif
 	}
 	else
 	if (opt_object_class == CKO_PUBLIC_KEY) {
-		CK_OBJECT_CLASS clazz = CKO_PUBLIC_KEY;
-		CK_KEY_TYPE type = CKK_RSA;
+		clazz = CKO_PUBLIC_KEY;
+#ifdef ENABLE_OPENSSL
+		pk_type = EVP_PKEY_base_id(evp_key);
+		if (pk_type == EVP_PKEY_RSA)
+			type = CKK_RSA;
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+		else if (pk_type == EVP_PKEY_EC)
+			type = CKK_EC;
+		else if (pk_type == NID_id_GostR3410_2001)
+			type = CKK_GOSTR3410;
+#endif
+		else
+			util_fatal("Unsupported public key type: 0x%X", pk_type);
+#endif
 
-		FILL_ATTR(pubkey_templ[0], CKA_CLASS, &clazz, sizeof(clazz));
-		FILL_ATTR(pubkey_templ[1], CKA_KEY_TYPE, &type, sizeof(type));
-		FILL_ATTR(pubkey_templ[2], CKA_TOKEN, &_true, sizeof(_true));
-		n_pubkey_attr = 3;
+		n_pubkey_attr = 0;
+		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_CLASS, &clazz, sizeof(clazz));
+		n_pubkey_attr++;
+		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_TOKEN, &_true, sizeof(_true));
+		n_pubkey_attr++;
 
 		if (opt_is_private != 0) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE,
-				&_true, sizeof(_true));
-			n_data_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PRIVATE, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+		else {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PRIVATE, &_false, sizeof(_false));
+			n_pubkey_attr++;
 		}
 
 		if (opt_object_label != NULL) {
@@ -1982,23 +2927,67 @@ static int write_object(CK_SESSION_HANDLE session)
 				opt_object_id, opt_object_id_len);
 			n_pubkey_attr++;
 		}
-#ifdef ENABLE_OPENSSL
-		if (cert.subject_len != 0) {
-			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_SUBJECT,
-				cert.subject, cert.subject_len);
+		if (opt_key_usage_sign != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_VERIFY, &_true, sizeof(_true));
 			n_pubkey_attr++;
 		}
-		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS,
-			rsa.modulus, rsa.modulus_len);
-		n_pubkey_attr++;
-		FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PUBLIC_EXPONENT,
-			rsa.public_exponent, rsa.public_exponent_len);
-		n_pubkey_attr++;
+		if (opt_key_usage_decrypt != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_ENCRYPT, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+		if (opt_key_usage_derive != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_DERIVE, &_true, sizeof(_true));
+			n_pubkey_attr++;
+		}
+
+#ifdef ENABLE_OPENSSL
+		if (cert.subject_len != 0) {
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_SUBJECT, cert.subject, cert.subject_len);
+			n_pubkey_attr++;
+		}
+		pk_type = EVP_PKEY_base_id(evp_key);
+
+		if (pk_type == EVP_PKEY_RSA) {
+			type = CKK_RSA;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_MODULUS,
+				rsa.modulus, rsa.modulus_len);
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_PUBLIC_EXPONENT, rsa.public_exponent, rsa.public_exponent_len);
+			n_pubkey_attr++;
+		}
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+		else if (pk_type == EVP_PKEY_EC)   {
+			type = CKK_EC;
+
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_EC_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_EC_POINT, gost.public.value, gost.public.len);
+			n_pubkey_attr++;
+		}
+		else if (pk_type == NID_id_GostR3410_2001) {
+			type = CKK_GOSTR3410;
+
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_KEY_TYPE, &type, sizeof(type));
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_GOSTR3410_PARAMS, gost.param_oid.value, gost.param_oid.len);
+			n_pubkey_attr++;
+			FILL_ATTR(pubkey_templ[n_pubkey_attr], CKA_VALUE, gost.public.value, gost.public.len);
+			/* CKA_VALUE of the GOST key has to be in the little endian order */
+			rv = sc_mem_reverse(pubkey_templ[n_pubkey_attr].pValue, pubkey_templ[n_pubkey_attr].ulValueLen);
+			if (rv)
+				return rv;
+			n_pubkey_attr++;
+		}
+#endif
 #endif
 	}
 	else
 	if (opt_object_class == CKO_DATA) {
-		CK_OBJECT_CLASS clazz = CKO_DATA;
+		clazz = CKO_DATA;
 		FILL_ATTR(data_templ[0], CKA_CLASS, &clazz, sizeof(clazz));
 		FILL_ATTR(data_templ[1], CKA_TOKEN, &_true, sizeof(_true));
 		FILL_ATTR(data_templ[2], CKA_VALUE, &contents, contents_len);
@@ -2006,8 +2995,11 @@ static int write_object(CK_SESSION_HANDLE session)
 		n_data_attr = 3;
 
 		if (opt_is_private != 0) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE,
-				&_true, sizeof(_true));
+			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE, &_true, sizeof(_true));
+			n_data_attr++;
+		}
+		else {
+			FILL_ATTR(data_templ[n_data_attr], CKA_PRIVATE, &_false, sizeof(_false));
 			n_data_attr++;
 		}
 
@@ -2021,24 +3013,23 @@ static int write_object(CK_SESSION_HANDLE session)
 			size_t len;
 
 			if (sc_format_oid(&oid, opt_application_id))
-				util_fatal("Invalid OID \"%s\"\n", opt_application_id);
+				util_fatal("Invalid OID \"%s\"", opt_application_id);
 
 			if (sc_asn1_encode_object_id(&oid_buf, &len, &oid))
-				util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+				util_fatal("Cannot encode OID \"%s\"", opt_application_id);
 
 			FILL_ATTR(data_templ[n_data_attr], CKA_OBJECT_ID, oid_buf, len);
 			n_data_attr++;
 		}
 
 		if (opt_object_label != NULL) {
-			FILL_ATTR(data_templ[n_data_attr], CKA_LABEL,
-				opt_object_label, strlen(opt_object_label));
+			FILL_ATTR(data_templ[n_data_attr], CKA_LABEL, opt_object_label, strlen(opt_object_label));
 			n_data_attr++;
 		}
 
 	}
 	else
-		util_fatal("Writing of a \"%s\" type not (yet) supported\n", opt_object_class_str);
+		util_fatal("Writing of a \"%s\" type not (yet) supported", opt_object_class_str);
 
 	if (n_data_attr) {
 		rv = p11->C_CreateObject(session, data_templ, n_data_attr, &data_obj);
@@ -2087,7 +3078,7 @@ static void set_id_attr(CK_SESSION_HANDLE session)
 	CK_RV rv;
 
 	if (!find_object(session, opt_object_class, &obj, opt_object_id, opt_object_id_len, 0)) {
-		printf("set_id(): coudn't find the object\n");
+		fprintf(stderr, "set_id(): couldn't find the object\n");
 		return;
 	}
 
@@ -2260,94 +3251,12 @@ find_mechanism(CK_SLOT_ID slot, CK_FLAGS flags,
 		else   {
 			*result = mechs[0];
 		}
-
-		free(mechs);
 	}
+	free(mechs);
 
 	return count;
 }
 
-
-#define ATTR_METHOD(ATTR, TYPE) \
-static TYPE \
-get##ATTR(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj) \
-{ \
-	TYPE		type = 0; \
-	CK_ATTRIBUTE	attr = { CKA_##ATTR, &type, sizeof(type) }; \
-	CK_RV		rv; \
- \
-	rv = p11->C_GetAttributeValue(sess, obj, &attr, 1); \
-	if (rv != CKR_OK) \
-		p11_warn("C_GetAttributeValue(" #ATTR ")", rv); \
-	return type; \
-}
-
-#define VARATTR_METHOD(ATTR, TYPE) \
-static TYPE * \
-get##ATTR(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj, CK_ULONG_PTR pulCount) \
-{ \
-	CK_ATTRIBUTE	attr = { CKA_##ATTR, NULL, 0 }; \
-	CK_RV		rv; \
- \
-	rv = p11->C_GetAttributeValue(sess, obj, &attr, 1); \
-	if (rv == CKR_OK) { \
-		if (!(attr.pValue = calloc(1, attr.ulValueLen + 1))) \
-			util_fatal("out of memory in get" #ATTR ": %m"); \
-		rv = p11->C_GetAttributeValue(sess, obj, &attr, 1); \
-		if (pulCount) \
-			*pulCount = attr.ulValueLen / sizeof(TYPE); \
-	} else {\
-		p11_warn("C_GetAttributeValue(" #ATTR ")", rv); \
-	} \
-	return (TYPE *) attr.pValue; \
-}
-
-/*
- * Define attribute accessors
- */
-ATTR_METHOD(CLASS, CK_OBJECT_CLASS);
-#if 0
-ATTR_METHOD(TOKEN, CK_BBOOL);
-ATTR_METHOD(LOCAL, CK_BBOOL);
-ATTR_METHOD(SENSITIVE, CK_BBOOL);
-ATTR_METHOD(ALWAYS_SENSITIVE, CK_BBOOL);
-ATTR_METHOD(NEVER_EXTRACTABLE, CK_BBOOL);
-#endif
-ATTR_METHOD(ALWAYS_AUTHENTICATE, CK_BBOOL);
-ATTR_METHOD(PRIVATE, CK_BBOOL);
-ATTR_METHOD(MODIFIABLE, CK_BBOOL);
-ATTR_METHOD(ENCRYPT, CK_BBOOL);
-ATTR_METHOD(DECRYPT, CK_BBOOL);
-ATTR_METHOD(SIGN, CK_BBOOL);
-#if 0
-ATTR_METHOD(SIGN_RECOVER, CK_BBOOL);
-#endif
-ATTR_METHOD(VERIFY, CK_BBOOL);
-#if 0
-ATTR_METHOD(VERIFY_RECOVER, CK_BBOOL);
-#endif
-ATTR_METHOD(WRAP, CK_BBOOL);
-ATTR_METHOD(UNWRAP, CK_BBOOL);
-ATTR_METHOD(DERIVE, CK_BBOOL);
-ATTR_METHOD(OPENSC_NON_REPUDIATION, CK_BBOOL);
-#if 0
-ATTR_METHOD(EXTRACTABLE, CK_BBOOL);
-#endif
-ATTR_METHOD(KEY_TYPE, CK_KEY_TYPE);
-ATTR_METHOD(CERTIFICATE_TYPE, CK_CERTIFICATE_TYPE);
-ATTR_METHOD(MODULUS_BITS, CK_ULONG);
-VARATTR_METHOD(LABEL, char);
-VARATTR_METHOD(APPLICATION, char);
-VARATTR_METHOD(ID, unsigned char);
-VARATTR_METHOD(OBJECT_ID, unsigned char);
-VARATTR_METHOD(MODULUS, CK_BYTE);
-#ifdef ENABLE_OPENSSL
-VARATTR_METHOD(PUBLIC_EXPONENT, CK_BYTE);
-#endif
-VARATTR_METHOD(VALUE, unsigned char);
-VARATTR_METHOD(GOSTR3410_PARAMS, unsigned char);
-VARATTR_METHOD(EC_POINT, unsigned char);
-VARATTR_METHOD(EC_PARAMS, unsigned char);
 
 static void list_objects(CK_SESSION_HANDLE sess, CK_OBJECT_CLASS  object_class)
 {
@@ -2395,101 +3304,156 @@ static void show_object(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 }
 
 
-static void
-derive_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key)
+static CK_OBJECT_HANDLE
+derive_ec_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key, CK_MECHANISM_TYPE mech_mech)
 {
-	unsigned char *value = NULL;
-	CK_ULONG value_len = 0;
+#if defined(ENABLE_OPENSSL) && OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
 	CK_MECHANISM mech;
 	CK_OBJECT_CLASS newkey_class= CKO_SECRET_KEY;
 	CK_KEY_TYPE newkey_type = CKK_GENERIC_SECRET;
 	CK_BBOOL true = TRUE;
 	CK_BBOOL false = FALSE;
 	CK_OBJECT_HANDLE newkey = 0;
-	CK_ECDH1_DERIVE_PARAMS ecdh_parms;
-	CK_RV rv;
-	int fd, r;
-	CK_ATTRIBUTE newkey_template[] = {
+	CK_ATTRIBUTE newkey_template[20] = {
 		{CKA_TOKEN, &false, sizeof(false)}, /* session only object */
 		{CKA_CLASS, &newkey_class, sizeof(newkey_class)},
 		{CKA_KEY_TYPE, &newkey_type, sizeof(newkey_type)},
+		{CKA_SENSITIVE, &false, sizeof(false)},
+		{CKA_EXTRACTABLE, &true, sizeof(true)},
 		{CKA_ENCRYPT, &true, sizeof(true)},
-		{CKA_DECRYPT, &true, sizeof(true)}
+		{CKA_DECRYPT, &true, sizeof(true)},
+		{CKA_WRAP, &true, sizeof(true)},
+		{CKA_UNWRAP, &true, sizeof(true)}
 	};
+	int n_attrs = 9;
+	CK_ECDH1_DERIVE_PARAMS ecdh_parms;
+	CK_RV rv;
+	BIO *bio_in = NULL;
+	EC_KEY  *eckey = NULL;
+	const EC_GROUP *ecgroup = NULL;
+	const EC_POINT *ecpoint = NULL;
+	unsigned char *buf = NULL;
+	size_t buf_size = 0;
+	CK_ULONG key_len = 0;
+	ASN1_OCTET_STRING *octet = NULL;
+	unsigned char * der = NULL;
+	unsigned char * derp = NULL;
+	size_t  der_size = 0;
 
-	if (!opt_mechanism_used)
-		if (!find_mechanism(slot, CKF_DERIVE|CKF_HW, NULL, 0, &opt_mechanism))
-			util_fatal("Derive mechanism not supported\n");
-
-	printf("Using derive algorithm 0x%8.8lx %s\n", opt_mechanism, p11_mechanism_to_name(opt_mechanism));
+	printf("Using derive algorithm 0x%8.8lx %s\n", opt_mechanism, p11_mechanism_to_name(mech_mech));
 	memset(&mech, 0, sizeof(mech));
-	mech.mechanism = opt_mechanism;
+	mech.mechanism = mech_mech;
 
-	switch(opt_mechanism) {
-#if defined(ENABLE_OPENSSL) && OPENSSL_VERSION_NUMBER >= 0x00908000L && !defined(OPENSSL_NO_EC) && !defined(OPENSSL_NO_ECDSA)
-	case CKM_ECDH1_COFACTOR_DERIVE:
-	case CKM_ECDH1_DERIVE:
-		/*  Use OpenSSL to read the other public key, and get the raw verion */
-		{
-		unsigned char buf[512];
-		int len;
-		BIO     *bio_in = NULL;
-		const EC_KEY  *eckey = NULL;
-		const EC_GROUP *ecgroup = NULL;
-		const EC_POINT * ecpoint = NULL;
+	/*  Use OpenSSL to read the other public key, and get the raw version */
+	bio_in = BIO_new(BIO_s_file());
+	if (BIO_read_filename(bio_in, opt_input) <= 0)
+		util_fatal("Cannot open %s: %m", opt_input);
 
-		bio_in = BIO_new(BIO_s_file());
-		if (BIO_read_filename(bio_in, opt_input) <= 0)
-			util_fatal("Cannot open %s: %m", opt_input);
+	eckey = d2i_EC_PUBKEY_bio(bio_in, NULL);
+	if (!eckey)
+		util_fatal("Cannot read EC key from %s", opt_input);
 
-		eckey = d2i_EC_PUBKEY_bio(bio_in, NULL);
-		if (!eckey)
-			util_fatal("Cannot read EC key from %s", opt_input);
+	ecpoint = EC_KEY_get0_public_key(eckey);
+	ecgroup = EC_KEY_get0_group(eckey);
 
-		ecpoint = EC_KEY_get0_public_key(eckey);
-		ecgroup = EC_KEY_get0_group(eckey);
-		if (!ecpoint || !ecgroup)
-			util_fatal("Failed to parse other EC kry from %s", opt_input);
+	if (!ecpoint || !ecgroup)
+		util_fatal("Failed to parse other EC key from %s", opt_input);
 
-		len = EC_POINT_point2oct(ecgroup, ecpoint, POINT_CONVERSION_UNCOMPRESSED, buf, sizeof(buf),NULL);
+	/* both eckeys must be same curve */
+	key_len = (EC_GROUP_get_degree(ecgroup) + 7) / 8;
+	FILL_ATTR(newkey_template[n_attrs], CKA_VALUE_LEN, &key_len, sizeof(key_len));
+	n_attrs++;
 
-		memset(&ecdh_parms, 0, sizeof(ecdh_parms));
-		ecdh_parms.kdf = CKD_NULL;
-		ecdh_parms.ulSharedDataLen = 0;
-		ecdh_parms.pSharedData = NULL;
-		ecdh_parms.ulPublicDataLen = len;	/* TODO drop header */
-		ecdh_parms.pPublicData = buf;		/* Cheat to test */
-		mech.pParameter = &ecdh_parms;
-		mech.ulParameterLen = sizeof(ecdh_parms);
-		}
-		break;
-#endif /* ENABLE_OPENSSL  && !OPENSSL_NO_EC && !OPENSSL_NO_ECDSA */
-	/* TODO add RSA  but do not have card to test */
-	default:
-		util_fatal("mechanisum not supported for derive\n");
-		break;
+	buf_size = EC_POINT_point2oct(ecgroup, ecpoint, POINT_CONVERSION_UNCOMPRESSED, NULL,	    0, NULL);
+	buf = (unsigned char *)malloc(buf_size);
+	if (buf == NULL)
+	    util_fatal("malloc() failure\n");
+	buf_size = EC_POINT_point2oct(ecgroup, ecpoint, POINT_CONVERSION_UNCOMPRESSED, buf, buf_size, NULL);
+
+	if (opt_derive_pass_der) {
+		octet = ASN1_OCTET_STRING_new();
+		if (octet == NULL)
+		    util_fatal("ASN1_OCTET_STRING_new failure\n");
+		ASN1_OCTET_STRING_set(octet, buf, buf_size);
+		der_size = i2d_ASN1_OCTET_STRING(octet, NULL);
+		derp = der = (unsigned char *) malloc(der_size);
+		if (der == NULL)
+			util_fatal("malloc() failure\n");
+		der_size = i2d_ASN1_OCTET_STRING(octet, &derp);
 	}
 
-	rv = p11->C_DeriveKey(session, &mech, key, newkey_template, 5, &newkey);
+	BIO_free(bio_in);
+	EC_KEY_free(eckey);
+
+	memset(&ecdh_parms, 0, sizeof(ecdh_parms));
+	ecdh_parms.kdf = CKD_NULL;
+	ecdh_parms.ulSharedDataLen = 0;
+	ecdh_parms.pSharedData = NULL;
+	if (opt_derive_pass_der) {
+		ecdh_parms.ulPublicDataLen = der_size;
+		ecdh_parms.pPublicData = der;
+	} else {
+		ecdh_parms.ulPublicDataLen = buf_size;
+		ecdh_parms.pPublicData = buf;
+	}
+	mech.pParameter = &ecdh_parms;
+	mech.ulParameterLen = sizeof(ecdh_parms);
+
+	rv = p11->C_DeriveKey(session, &mech, key, newkey_template, n_attrs, &newkey);
 	if (rv != CKR_OK)
 	    p11_fatal("C_DeriveKey", rv);
 
-	/*TODO get the key value and write to stdout or file */
-	value = getVALUE(session, newkey, &value_len);
+	if (der)
+	    OPENSSL_free(der);
+	if (buf)
+	    free(buf);
+	if (octet)
+	    ASN1_OCTET_STRING_free(octet);
+
+	return newkey;
+#else
+	util_fatal("Derive EC key not supported");
+	return 0;
+#endif /* ENABLE_OPENSSL  && !OPENSSL_NO_EC && !OPENSSL_NO_ECDSA */
+}
+
+
+static void
+derive_key(CK_SLOT_ID slot, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key)
+{
+	CK_BYTE *value = NULL;
+	CK_ULONG value_len = 0;
+	CK_OBJECT_HANDLE derived_key = 0;
+	int rv, fd;
+
+	if (!opt_mechanism_used)
+		if (!find_mechanism(slot, CKF_DERIVE|CKF_HW, NULL, 0, &opt_mechanism))
+			util_fatal("Derive mechanism not supported");
+
+	switch(opt_mechanism) {
+	case CKM_ECDH1_COFACTOR_DERIVE:
+	case CKM_ECDH1_DERIVE:
+		derived_key= derive_ec_key(session, key, opt_mechanism);
+		break;
+	default:
+		util_fatal("mechanism not supported for derive");
+		break;
+	}
+
+	value = getVALUE(session, derived_key, &value_len);
 	if (value && value_len > 0) {
-		if (opt_output == NULL)   {
-			fd = 1;
-		}
-		else  {
+		fd = STDOUT_FILENO;
+		if (opt_output)   {
 			fd = open(opt_output, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, S_IRUSR|S_IWUSR);
 			if (fd < 0)
 				util_fatal("failed to open %s: %m", opt_output);
 		}
 
-		r = write(fd, value, value_len);
-		if (r < 0)
+		rv = write(fd, value, value_len);
+		if (rv < 0)
 			util_fatal("Failed to write to %s: %m", opt_output);
-		if (fd != 1)
+
+		if (opt_output)
 			close(fd);
 	}
 }
@@ -2504,7 +3468,7 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 	const char      *sepa;
 	char		*label;
 	int		pub = 1;
-	int             sec = 0;
+	int		sec = 0;
 
 	switch(getCLASS(sess, obj)) {
 		case CKO_PRIVATE_KEY:
@@ -2567,6 +3531,7 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 			unsigned char *bytes = NULL;
 			unsigned int n;
 			int ksize;
+
 			bytes = getEC_POINT(sess, obj, &size);
 			/*
 			 * (We only support uncompressed for now)
@@ -2582,10 +3547,10 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 			else
 				ksize = (size - 5) * 4;
 
-			printf(" EC_POINT %d bits\n", ksize);
+			printf("  EC_POINT %d bits\n", ksize);
 			if (bytes) {
 				if ((CK_LONG)size > 0) { /* Will print the point here */
-					printf(" EC_POINT:  ");
+					printf("  EC_POINT:   ");
 					for (n = 0; n < size; n++)
 						printf("%02x", bytes[n]);
 					printf("\n");
@@ -2607,6 +3572,22 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 			 printf("\n");
 		break;
 	case CKK_GENERIC_SECRET:
+	case CKK_AES:
+	case CKK_DES:
+	case CKK_DES3:
+		if (key_type == CKK_AES)
+			printf("; AES");
+		else if (key_type == CKK_DES)
+			printf("; DES");
+		else if (key_type == CKK_DES3)
+			printf("; DES3");
+		else
+			printf("; Generic secret");
+		size = getVALUE_LEN(sess, obj);
+		if (size)
+			printf(" length %li", size);
+		size = 0;
+		printf("\n");
 		value = getVALUE(sess, obj, &size);
 		if (value) {
 			unsigned int    n;
@@ -2676,7 +3657,7 @@ show_key(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf("%sunwrap", sepa);
 		sepa = ", ";
 	}
-	if ((!pub || sec) && getDERIVE(sess, obj)) {
+	if (getDERIVE(sess, obj)) {
 		printf("%sderive", sepa);
 		sepa = ", ";
 	}
@@ -2696,7 +3677,7 @@ static void show_cert(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 	unsigned char	*id;
 	char		*label;
 
-	printf("Certificate Object, type = ");
+	printf("Certificate Object; type = ");
 	switch (cert_type) {
 	case CKC_X_509:
 		printf("X.509 cert\n");
@@ -2705,10 +3686,10 @@ static void show_cert(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 		printf("X.509 attribute cert\n");
 		break;
 	case CKC_VENDOR_DEFINED:
-		printf("vendor defined");
+		printf("vendor defined\n");
 		break;
 	default:
-		printf("; unknown cert type\n");
+		printf("unknown cert type\n");
 		break;
 	}
 
@@ -2780,7 +3761,7 @@ static void show_dobj(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE obj)
 	if (getPRIVATE(sess, obj))
 		printf(" private");
 	if (!getMODIFIABLE(sess, obj) && !getPRIVATE(sess, obj))
-		printf("<empty>\n");
+		printf("<empty>");
 
 	printf ("\n");
 	suppress_warn = 0;
@@ -2805,7 +3786,10 @@ get_mechanisms(CK_SLOT_ID slot, CK_MECHANISM_TYPE_PTR *pList, CK_FLAGS flags)
 	CK_RV		rv;
 
 	rv = p11->C_GetMechanismList(slot, *pList, &ulCount);
-	*pList = calloc(ulCount, sizeof(*pList));
+	if (rv != CKR_OK)
+		p11_fatal("C_GetMechanismList", rv);
+
+	*pList = calloc(ulCount, sizeof(**pList));
 	if (*pList == NULL)
 		util_fatal("calloc failed: %m");
 
@@ -2830,6 +3814,26 @@ get_mechanisms(CK_SLOT_ID slot, CK_MECHANISM_TYPE_PTR *pList, CK_FLAGS flags)
 	return ulCount;
 }
 
+#ifdef ENABLE_OPENSSL
+unsigned char *BIO_copy_data(BIO *out, int *data_lenp) {
+    unsigned char *data, *tdata;
+    int data_len;
+
+    data_len = BIO_get_mem_data(out, &tdata);
+    data = malloc(data_len+1);
+    if (data) {
+        memcpy(data, tdata, data_len);
+	data[data_len]='\0';  // Make sure it's \0 terminated, in case used as string
+	if (data_lenp) {
+	    *data_lenp = data_len;
+	}
+    } else {
+        util_fatal("malloc failed");
+    }
+    return data;
+}
+#endif
+
 /*
  * Read object CKA_VALUE attribute's value.
  */
@@ -2838,6 +3842,9 @@ static int read_object(CK_SESSION_HANDLE session)
 	CK_RV rv;
 	CK_ATTRIBUTE attrs[20];
 	CK_OBJECT_CLASS clazz = opt_object_class;
+#ifdef ENABLE_OPENSSL
+	CK_KEY_TYPE type = CKK_RSA;
+#endif
 	CK_OBJECT_HANDLE obj = CK_INVALID_HANDLE;
 	int nn_attrs = 0;
 	unsigned char *value = NULL, *oid_buf = NULL;
@@ -2874,10 +3881,10 @@ static int read_object(CK_SESSION_HANDLE session)
 		size_t oid_buf_len;
 
 		if (sc_format_oid(&oid, opt_application_id))
-			util_fatal("Invalid OID \"%s\"\n", opt_application_id);
+			util_fatal("Invalid OID \"%s\"", opt_application_id);
 
 		if (sc_asn1_encode_object_id(&oid_buf, &oid_buf_len, &oid))
-			util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+			util_fatal("Cannot encode OID \"%s\"", opt_application_id);
 
 		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID, oid_buf, oid_buf_len);
 		nn_attrs++;
@@ -2905,29 +3912,123 @@ static int read_object(CK_SESSION_HANDLE session)
 	if (rv != CKR_OK)
 		p11_fatal("find_object_with_attributes()", rv);
 	else if (obj==CK_INVALID_HANDLE)
-		util_fatal("object not found\n");
+		util_fatal("object not found");
 
 /* TODO: -DEE should look at object class, and get appropriate values
  * based on the object, and other attributes. For example EC keys do
- * not have a VALUE But have a EC_POINT.
+ * not have a VALUE But have a EC_POINT. DvO: done for RSA and EC public keys.
  */
-	value = getVALUE(session, obj, &len);
+	if (clazz == CKO_PRIVATE_KEY) {
+		fprintf(stderr, "sorry, reading private keys not (yet) supported\n");
+		return 0;
+	}
+	if (clazz == CKO_PUBLIC_KEY) {
+#ifdef ENABLE_OPENSSL
+		int derlen;
+		BIO *pout = BIO_new(BIO_s_mem());
+		if (!pout)
+			util_fatal("out of memory");
+
+		type = getKEY_TYPE(session, obj);
+		if (type == CKK_RSA) {
+			RSA *rsa;
+			BIGNUM *rsa_n = NULL;
+			BIGNUM *rsa_e = NULL;
+
+
+			rsa = RSA_new();
+			if (rsa == NULL)
+				util_fatal("out of memory");
+
+			if ((value = getMODULUS(session, obj, &len))) {
+				if (!(rsa_n = BN_bin2bn(value, len, NULL)))
+					util_fatal("cannot parse MODULUS");
+				free(value);
+			} else
+				util_fatal("cannot obtain MODULUS");
+
+			if ((value = getPUBLIC_EXPONENT(session, obj, &len))) {
+				if (!(rsa_e = BN_bin2bn(value, len, NULL)))
+					util_fatal("cannot parse PUBLIC_EXPONENT");
+				free(value);
+			} else
+				util_fatal("cannot obtain PUBLIC_EXPONENT");
+
+			if (RSA_set0_key(rsa, rsa_n, rsa_e, NULL) != 1)
+				util_fatal("cannot set RSA values");
+
+			if (!i2d_RSA_PUBKEY_bio(pout, rsa))
+				util_fatal("cannot convert RSA public key to DER");
+			RSA_free(rsa);
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L && !defined(OPENSSL_NO_EC)
+		} else if (type == CKK_EC) {
+			EC_KEY *ec;
+			CK_BYTE *params;
+			const unsigned char *a;
+			ASN1_OCTET_STRING *os;
+			EC_KEY *success = NULL;
+
+			ec = EC_KEY_new();
+			if (ec == NULL)
+				util_fatal("out of memory");
+
+			if ((params = getEC_PARAMS(session, obj, &len))) {
+				const unsigned char *a = params;
+				if (!d2i_ECParameters(&ec, &a, (long)len))
+					util_fatal("cannot parse EC_PARAMS");
+				OPENSSL_free(params);
+			} else
+				util_fatal("cannot obtain EC_PARAMS");
+
+			value = getEC_POINT(session, obj, &len);
+			/* PKCS#11-compliant modules should return ASN1_OCTET_STRING */
+			a = value;
+			os = d2i_ASN1_OCTET_STRING(NULL, &a, (long)len);
+			if (os) {
+				a = os->data;
+				success = o2i_ECPublicKey(&ec, &a, os->length);
+				ASN1_STRING_free(os);
+			}
+			if (!success) { /* Workaround for broken PKCS#11 modules */
+				a = value;
+				success = o2i_ECPublicKey(&ec, &a, len);
+			}
+			free(value);
+			if (!success)
+				util_fatal("cannot obtain and parse EC_POINT");
+			if (!i2d_EC_PUBKEY_bio(pout, ec))
+				util_fatal("cannot convert EC public key to DER");
+			EC_KEY_free(ec);
+#endif
+		}
+		else
+			util_fatal("Reading public keys of type 0x%X not (yet) supported", type);
+		value = BIO_copy_data(pout, &derlen);
+		BIO_free(pout);
+		len = derlen;
+#else
+		util_fatal("No OpenSSL support, cannot read public key");
+#endif
+	}
+	else
+		value = getVALUE(session, obj, &len);
 	if (value == NULL)
-		util_fatal("get CKA_VALUE failed\n");
+		util_fatal("get CKA_VALUE failed");
 
 	if (opt_output)   {
 		out = fopen(opt_output, "wb");
 		if (out==NULL)
-			util_fatal("cannot open '%s'\n", opt_output);
+			util_fatal("cannot open '%s'", opt_output);
 	}
 	else
 		out = stdout;
 
 	if (fwrite(value, 1, len, out) != len)
-		util_fatal("cannot write to '%s'\n", opt_output);
+		util_fatal("cannot write to '%s'", opt_output);
 	if (opt_output)
 		fclose(out);
 
+	free(value);
 	if (oid_buf)
 		free(oid_buf);
 	return 1;
@@ -2974,10 +4075,10 @@ static int delete_object(CK_SESSION_HANDLE session)
 		size_t oid_buf_len;
 
 		if (sc_format_oid(&oid, opt_application_id))
-			util_fatal("Invalid OID '%s'\n", opt_application_id);
+			util_fatal("Invalid OID '%s'", opt_application_id);
 
 		if (sc_asn1_encode_object_id(&oid_buf, &oid_buf_len, &oid))
-			util_fatal("Cannot encode OID \"%s\"\n", opt_application_id);
+			util_fatal("Cannot encode OID \"%s\"", opt_application_id);
 
 		FILL_ATTR(attrs[nn_attrs], CKA_OBJECT_ID, oid_buf, oid_buf_len);
 		nn_attrs++;
@@ -2987,7 +4088,7 @@ static int delete_object(CK_SESSION_HANDLE session)
 	if (rv != CKR_OK)
 		p11_fatal("find_object_with_attributes()", rv);
 	else if (obj==CK_INVALID_HANDLE)
-		util_fatal("object not found\n");
+		util_fatal("object not found");
 	rv = p11->C_DestroyObject(session, obj);
 	if (rv != CKR_OK)
 		p11_fatal("C_DestroyObject()", rv);
@@ -3007,13 +4108,13 @@ static CK_ULONG	get_private_key_length(CK_SESSION_HANDLE sess, CK_OBJECT_HANDLE 
 	id = NULL;
 	id = getID(sess, prkey, &idLen);
 	if (id == NULL) {
-		printf("private key has no ID, can't lookup the corresponding pubkey\n");
+		fprintf(stderr, "private key has no ID, can't lookup the corresponding pubkey\n");
 		return 0;
 	}
 
 	if (!find_object(sess, CKO_PUBLIC_KEY, &pubkey, id, idLen, 0)) {
 		free(id);
-		printf("coudn't find the corresponding pubkey\n");
+		fprintf(stderr, "couldn't find the corresponding pubkey\n");
 		return 0;
 	}
 	free(id);
@@ -3055,7 +4156,7 @@ static int test_digest(CK_SESSION_HANDLE session)
 		p11_fatal("C_OpenSession", rv);
 
 	if (!find_mechanism(sessionInfo.slotID, CKF_DIGEST, NULL, 0, &firstMechType)) {
-		printf("Digests: not implemented\n");
+		fprintf(stderr, "Digests: not implemented\n");
 		return errors;
 	}
 	else    {
@@ -3063,6 +4164,7 @@ static int test_digest(CK_SESSION_HANDLE session)
 	}
 
 	/* 1st test */
+	pseudo_randomize(data, sizeof(data));
 
 	ck_mech.mechanism = firstMechType;
 	rv = p11->C_DigestInit(session, &ck_mech);
@@ -3193,17 +4295,18 @@ static EVP_PKEY *get_public_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE priv
 	CK_ULONG        pubkeyLen;
 	EVP_PKEY       *pkey;
 	RSA            *rsa;
+	BIGNUM *rsa_n, *rsa_e;
 
 	id = NULL;
 	id = getID(session, privKeyObject, &idLen);
 	if (id == NULL) {
-		printf("private key has no ID, can't lookup the corresponding pubkey for verification\n");
+		fprintf(stderr, "private key has no ID, can't lookup the corresponding pubkey for verification\n");
 		return NULL;
 	}
 
 	if (!find_object(session, CKO_PUBLIC_KEY, &pubkeyObject, id, idLen, 0)) {
 		free(id);
-		printf("coudn't find the corresponding pubkey for validation\n");
+		fprintf(stderr, "couldn't find the corresponding pubkey for validation\n");
 		return NULL;
 	}
 	free(id);
@@ -3215,19 +4318,22 @@ static EVP_PKEY *get_public_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE priv
 			mod = getMODULUS(session, pubkeyObject, &modLen);
 			exp = getPUBLIC_EXPONENT(session, pubkeyObject, &expLen);
 			if ( !pkey || !rsa || !mod || !exp) {
-				printf("public key not extractable\n");
+				fprintf(stderr, "public key not extractable\n");
 				if (pkey)
-					free(pkey);
+					EVP_PKEY_free(pkey);
 				if (rsa)
-					free(rsa);
+					RSA_free(rsa);
 				if (mod)
 					free(mod);
 				if (exp)
 					free(exp);
 				return NULL;
 			}
-			rsa->n = BN_bin2bn(mod, modLen, NULL);
-			rsa->e = BN_bin2bn(exp, expLen, NULL);
+			rsa_n = BN_bin2bn(mod, modLen, NULL);
+			rsa_e =	BN_bin2bn(exp, expLen, NULL);
+			if (RSA_set0_key(rsa, rsa_n, rsa_e, NULL) != 1)
+			    return NULL;
+
 			EVP_PKEY_assign_RSA(pkey, rsa);
 			free(mod);
 			free(exp);
@@ -3237,13 +4343,13 @@ static EVP_PKEY *get_public_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE priv
 		case CKK_GOSTR3410:
 			break;
 		default:
-			printf("public key of unsupported type\n");
+			fprintf(stderr, "public key of unsupported type\n");
 			return NULL;
 	}
 
 	pubkey = getVALUE(session, pubkeyObject, &pubkeyLen);
 	if (pubkey == NULL) {
-		printf("couldn't get the pubkey VALUE attribute, no validation done\n");
+		fprintf(stderr, "couldn't get the pubkey VALUE attribute, no validation done\n");
 		return NULL;
 	}
 
@@ -3252,7 +4358,7 @@ static EVP_PKEY *get_public_key(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE priv
 	free(pubkey);
 
 	if (pkey == NULL) {
-		printf(" couldn't parse pubkey, no verification done\n");
+		fprintf(stderr, "couldn't parse pubkey, no verification done\n");
 		return NULL;
 	}
 
@@ -3274,7 +4380,7 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 #ifdef ENABLE_OPENSSL
 	int             err;
 	EVP_PKEY       *pkey;
-	EVP_MD_CTX      md_ctx;
+	EVP_MD_CTX      *md_ctx;
 
 	const EVP_MD         *evp_mds[] = {
 		EVP_sha1(),
@@ -3282,7 +4388,9 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 		EVP_sha1(),
 		EVP_md5(),
 		EVP_ripemd160(),
+#if OPENSSL_VERSION_NUMBER >= 0x00908000L
 		EVP_sha256(),
+#endif
 	};
 #endif
 
@@ -3292,7 +4400,6 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 		return errors;
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
-
 	if (getALWAYS_AUTHENTICATE(session, privKeyObject))
 		login(session,CKU_CONTEXT_SPECIFIC);
 	printf("    %s: ", p11_mechanism_to_name(ck_mech->mechanism));
@@ -3310,15 +4417,22 @@ static int sign_verify_openssl(CK_SESSION_HANDLE session,
 				(unsigned int) modLenBytes);
 	}
 #ifndef ENABLE_OPENSSL
-	printf("unable to verify signature (compile with ENABLE_OPENSSL)\n");
+	fprintf(stderr, "unable to verify signature (compile with ENABLE_OPENSSL)\n");
 #else
 
 	if (!(pkey = get_public_key(session, privKeyObject)))
 		return errors;
 
-	EVP_VerifyInit(&md_ctx, evp_mds[evp_md_index]);
-	EVP_VerifyUpdate(&md_ctx, verifyData, verifyDataLen);
-	err = EVP_VerifyFinal(&md_ctx, sig1, sigLen1, pkey);
+	md_ctx = EVP_MD_CTX_create();
+	if (!md_ctx)
+		err = -1;
+	else {
+		EVP_VerifyInit(md_ctx, evp_mds[evp_md_index]);
+		EVP_VerifyUpdate(md_ctx, verifyData, verifyDataLen);
+		err = EVP_VerifyFinal(md_ctx, sig1, sigLen1, pkey);
+		EVP_MD_CTX_destroy(md_ctx);
+		EVP_PKEY_free(pkey);
+	}
 	if (err == 0) {
 		printf("ERR: verification failed\n");
 		errors++;
@@ -3345,7 +4459,7 @@ static int test_signature(CK_SESSION_HANDLE sess)
 	CK_MECHANISM_TYPE firstMechType;
 	CK_SESSION_INFO sessionInfo;
 	CK_ULONG        i, j;
-	unsigned char   data[256];
+	unsigned char   data[512]; /* FIXME: Will not work for keys above 4096 bits */
 	CK_ULONG        modLenBytes = 0;
 	CK_ULONG        dataLen;
 	unsigned char   sig1[1024], sig2[1024];
@@ -3359,7 +4473,9 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		CKM_SHA1_RSA_PKCS,
 		CKM_MD5_RSA_PKCS,
 		CKM_RIPEMD160_RSA_PKCS,
+#if OPENSSL_VERSION_NUMBER >= 0x00908000L
 		CKM_SHA256_RSA_PKCS,
+#endif
 		0xffffff
 	};
 	size_t mechTypes_num = sizeof(mechTypes)/sizeof(CK_MECHANISM_TYPE);
@@ -3389,8 +4505,8 @@ static int test_signature(CK_SESSION_HANDLE sess)
 	rv = p11->C_GetSessionInfo(sess, &sessionInfo);
 	if (rv != CKR_OK)
 		p11_fatal("C_OpenSession", rv);
-	if ((sessionInfo.state & CKS_RO_USER_FUNCTIONS) == 0) {
-		printf("Signatures: not logged in, skipping signature tests\n");
+	if (!(sessionInfo.state & CKS_RW_USER_FUNCTIONS)) {
+		printf("Signature: not a R/W session, skipping signature tests\n");
 		return errors;
 	}
 
@@ -3399,12 +4515,16 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	printf("Signatures (currently only RSA signatures)\n");
+	printf("Signatures (currently only for RSA)\n");
 	for (j = 0; find_object(sess, CKO_PRIVATE_KEY, &privKeyObject, NULL, 0, j); j++) {
 		printf("  testing key %ld ", j);
 		if ((label = getLABEL(sess, privKeyObject, NULL)) != NULL) {
 			printf("(%s) ", label);
 			free(label);
+		}
+		if (getKEY_TYPE(sess, privKeyObject) != CKK_RSA) {
+			printf(" -- non-RSA, skipping\n");
+			continue;
 		}
 
 		if (!getSIGN(sess, privKeyObject)) {
@@ -3421,12 +4541,9 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		break;
 	}
 	if (privKeyObject == CK_INVALID_HANDLE) {
-		printf("Signatures: no private key found in this slot\n");
+		fprintf(stderr, "Signatures: no private key found in this slot\n");
 		return 0;
 	}
-
-	data[0] = 0;
-	data[1] = 1;
 
 	/* 1st test */
 
@@ -3438,16 +4555,28 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		break;
 	case CKM_RSA_X_509:
 		dataLen = modLenBytes;
+		pseudo_randomize(data, dataLen);
 		break;
 	default:
 		dataLen = sizeof(data);	/* let's hope it's OK */
+		pseudo_randomize(data, dataLen);
 		break;
+	}
+
+	if (firstMechType == CKM_RSA_X_509) {
+		/* make sure our data is smaller than the modulus */
+		data[0] = 0x00;
 	}
 
 	ck_mech.mechanism = firstMechType;
 	rv = p11->C_SignInit(sess, &ck_mech, privKeyObject);
+	/* mechanism not implemented, don't test */
+	if (rv == CKR_MECHANISM_INVALID)
+		return errors;
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
+	if (getALWAYS_AUTHENTICATE(sess, privKeyObject))
+		login(sess,CKU_CONTEXT_SPECIFIC);
 
 	rv = p11->C_SignUpdate(sess, data, 5);
 	if (rv == CKR_FUNCTION_NOT_SUPPORTED) {
@@ -3533,6 +4662,7 @@ static int test_signature(CK_SESSION_HANDLE sess)
 
 	/* Fill in data[0] and dataLens[0] */
 	dataLen = modLenBytes;
+	data[0] = 0x00;
 	data[1] = 0x01;
 	memset(data + 2, 0xFF, dataLen - 3 - dataLens[1]);
 	data[dataLen - 36] = 0x00;
@@ -3548,10 +4678,10 @@ static int test_signature(CK_SESSION_HANDLE sess)
 			modLenBytes, i);
 	}
 
-	/* 4rd test: the other signature keys */
+	/* 4th test: the other signature keys */
 
 	for (i = 0; mechTypes[i] != 0xffffff; i++)
-		if (i == firstMechType)
+		if (mechTypes[i] == firstMechType)
 			break;
 	ck_mech.mechanism = mechTypes[i];
 	j = 1;  /* j-th signature key */
@@ -3570,6 +4700,10 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		if (label)
 			free(label);
 
+		if (getKEY_TYPE(sess, privKeyObject) != CKK_RSA) {
+			printf(" -- non-RSA, skipping\n");
+			continue;
+		}
 		if (!getSIGN(sess, privKeyObject)) {
 			printf(" -- can't be used to sign/verify, skipping\n");
 			continue;
@@ -3581,6 +4715,16 @@ static int test_signature(CK_SESSION_HANDLE sess)
 		else   {
 			printf("\n");
 		}
+
+		/* Fill in data[0] and dataLens[0] */
+		dataLen = modLenBytes;
+		data[0] = 0x00;
+		data[1] = 0x01;
+		memset(data + 2, 0xFF, dataLen - 3 - dataLens[1]);
+		data[dataLen - 36] = 0x00;
+		memcpy(data + (dataLen - dataLens[1]), datas[1], dataLens[1]);
+		datas[0] = data;
+		dataLens[0] = dataLen;
 
 		errors += sign_verify_openssl(sess, &ck_mech, privKeyObject,
 			datas[i], dataLens[i], verifyData, sizeof(verifyData),
@@ -3635,10 +4779,9 @@ static int sign_verify(CK_SESSION_HANDLE session,
 			printf("  ERR: C_SignInit() returned %s (0x%0x)\n", CKR2Str(rv), (int) rv);
 			return ++errors;
 		}
-
-		printf("    %s: ", p11_mechanism_to_name(*mech_type));
 		if (getALWAYS_AUTHENTICATE(session, priv_key))
 			login(session,CKU_CONTEXT_SPECIFIC);
+		printf("    %s: ", p11_mechanism_to_name(*mech_type));
 
 		signat_len = sizeof(signat);
 		rv = p11->C_Sign(session, datas[j], data_lens[j], signat, &signat_len);
@@ -3682,8 +4825,8 @@ static int test_verify(CK_SESSION_HANDLE sess)
 	rv = p11->C_GetSessionInfo(sess, &sessionInfo);
 	if (rv != CKR_OK)
 		p11_fatal("C_OpenSession", rv);
-	if ((sessionInfo.state & CKS_RO_USER_FUNCTIONS) == 0) {
-		printf("Verify: not logged in, skipping verify tests\n");
+	if (!(sessionInfo.state & CKS_RW_USER_FUNCTIONS)) {
+		printf("Verify: not a R/W session, skipping verify tests\n");
 		return errors;
 	}
 
@@ -3692,7 +4835,7 @@ static int test_verify(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	printf("Verify (currently only for RSA):\n");
+	printf("Verify (currently only for RSA)\n");
 
 	for (i = 0; find_object(sess, CKO_PRIVATE_KEY, &priv_key, NULL, 0, i); i++) {
 		char *label;
@@ -3706,7 +4849,10 @@ static int test_verify(CK_SESSION_HANDLE sess)
 		}
 		if (i != 0)
 			printf(" with 1 mechanism");
-		printf("\n");
+		if (getKEY_TYPE(sess, priv_key) != CKK_RSA) {
+			printf(" -- non-RSA, skipping\n");
+			continue;
+		}
 
 		if (!getSIGN(sess, priv_key)) {
 			printf(" -- can't be used to sign/verify, skipping\n");
@@ -3732,6 +4878,7 @@ static int test_verify(CK_SESSION_HANDLE sess)
 			printf(" -- can't get the modulus length, skipping\n");
 			continue;
 		}
+		printf("\n");
 
 		errors += sign_verify(sess, priv_key, key_len, pub_key, i != 0);
 	}
@@ -3749,7 +4896,7 @@ static int wrap_unwrap(CK_SESSION_HANDLE session,
 	CK_OBJECT_HANDLE cipherKeyObject;
 	CK_RV           rv;
 	EVP_PKEY       *pkey;
-	EVP_CIPHER_CTX	seal_ctx;
+	EVP_CIPHER_CTX	* seal_ctx;
 	unsigned char	keybuf[512], *key = keybuf;
 	int		key_len;
 	unsigned char	iv[32], ciphered[1024], cleartext[1024];
@@ -3765,17 +4912,32 @@ static int wrap_unwrap(CK_SESSION_HANDLE session,
 
 	printf("    %s: ", OBJ_nid2sn(EVP_CIPHER_nid(algo)));
 
-	EVP_SealInit(&seal_ctx, algo,
+	seal_ctx = EVP_CIPHER_CTX_new();
+	if (seal_ctx == NULL) {
+		printf("Internal error.\n");
+		return 1;
+	}
+
+	if (!EVP_SealInit(seal_ctx, algo,
 			&key, &key_len,
-			iv, &pkey, 1);
+			iv, &pkey, 1)) {
+		fprintf(stderr, "Internal error.\n");
+		return 1;
+	}
 
 	/* Encrypt something */
 	len = sizeof(ciphered);
-	EVP_SealUpdate(&seal_ctx, ciphered, &len, (const unsigned char *) "hello world", 11);
+	if (!EVP_SealUpdate(seal_ctx, ciphered, &len, (const unsigned char *) "hello world", 11)) {
+		printf("Internal error.\n");
+		return 1;
+	}
 	ciphered_len = len;
 
 	len = sizeof(ciphered) - ciphered_len;
-	EVP_SealFinal(&seal_ctx, ciphered + ciphered_len, &len);
+	if (!EVP_SealFinal(seal_ctx, ciphered + ciphered_len, &len)) {
+		printf("Internal error.\n");
+		return 1;
+	}
 	ciphered_len += len;
 
 	EVP_PKEY_free(pkey);
@@ -3800,23 +4962,32 @@ static int wrap_unwrap(CK_SESSION_HANDLE session,
 	key = getVALUE(session, cipherKeyObject, &key_len_ul);
 	key_len = key_len_ul;
 	if (key == NULL) {
-		printf("Could not get unwrapped key\n");
+		fprintf(stderr, "Could not get unwrapped key\n");
 		return 1;
 	}
 	if (key_len != EVP_CIPHER_key_length(algo)) {
-		printf("Key length mismatch (%d != %d)\n",
+		fprintf(stderr, "Key length mismatch (%d != %d)\n",
 				key_len, EVP_CIPHER_key_length(algo));
 		return 1;
 	}
 
-	EVP_DecryptInit(&seal_ctx, algo, key, iv);
+	if (!EVP_DecryptInit(seal_ctx, algo, key, iv)) {
+		printf("Internal error.\n");
+		return 1;
+	}
 
 	len = sizeof(cleartext);
-	EVP_DecryptUpdate(&seal_ctx, cleartext, &len, ciphered, ciphered_len);
+	if (!EVP_DecryptUpdate(seal_ctx, cleartext, &len, ciphered, ciphered_len)) {
+		printf("Internal error.\n");
+		return 1;
+	}
 
 	cleartext_len = len;
 	len = sizeof(cleartext) - len;
-	EVP_DecryptFinal(&seal_ctx, cleartext + cleartext_len, &len);
+	if (!EVP_DecryptFinal(seal_ctx, cleartext + cleartext_len, &len)) {
+		printf("Internal error.\n");
+		return 1;
+	}
 	cleartext_len += len;
 
 	if (cleartext_len != 11
@@ -3824,6 +4995,9 @@ static int wrap_unwrap(CK_SESSION_HANDLE session,
 		printf("resulting cleartext doesn't match input\n");
 		return 1;
 	}
+
+	if (seal_ctx)
+	    EVP_CIPHER_CTX_free(seal_ctx);
 
 	printf("OK\n");
 	return 0;
@@ -3857,12 +5031,16 @@ static int test_unwrap(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	printf("Key unwrap (RSA)\n");
+	printf("Key unwrap (currently only for RSA)\n");
 	for (j = 0; find_object(sess, CKO_PRIVATE_KEY, &privKeyObject, NULL, 0, j); j++) {
 		printf("  testing key %ld ", j);
 		if ((label = getLABEL(sess, privKeyObject, NULL)) != NULL) {
 			printf("(%s) ", label);
 			free(label);
+		}
+		if (getKEY_TYPE(sess, privKeyObject) != CKK_RSA) {
+			printf(" -- non-RSA, skipping\n");
+			continue;
 		}
 		if (!getUNWRAP(sess, privKeyObject)) {
 			printf(" -- can't be used to unwrap, skipping\n");
@@ -3913,19 +5091,21 @@ static int encrypt_decrypt(CK_SESSION_HANDLE session,
 	encrypted_len = EVP_PKEY_encrypt(encrypted, orig_data, sizeof(orig_data), pkey);
 #endif
 	EVP_PKEY_free(pkey);
-	if (encrypted_len <= 0) {
+	if (((int) encrypted_len) <= 0) {
 		printf("Encryption failed, returning\n");
 		return 0;
 	}
 
 	mech.mechanism = mech_type;
 	rv = p11->C_DecryptInit(session, &mech, privKeyObject);
-	if (rv == CKR_MECHANISM_INVALID) {
+	if (rv == CKR_MECHANISM_INVALID || rv == CKR_MECHANISM_PARAM_INVALID) {
 		printf("Mechanism not supported\n");
 		return 0;
 	}
 	if (rv != CKR_OK)
 		p11_fatal("C_DecryptInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, privKeyObject))
+		login(session,CKU_CONTEXT_SPECIFIC);
 
 	data_len = encrypted_len;
 	rv = p11->C_Decrypt(session, encrypted, encrypted_len, data, &data_len);
@@ -3969,14 +5149,17 @@ static int test_decrypt(CK_SESSION_HANDLE sess)
 	CK_OBJECT_HANDLE privKeyObject;
 	CK_MECHANISM_TYPE *mechs = NULL;
 	CK_SESSION_INFO sessionInfo;
-	CK_ULONG        j, n, num_mechs = 0;
+	CK_ULONG        j, num_mechs = 0;
+#ifdef ENABLE_OPENSSL
+	CK_ULONG        n;
+#endif
 	char 		*label;
 
 	rv = p11->C_GetSessionInfo(sess, &sessionInfo);
 	if (rv != CKR_OK)
 		p11_fatal("C_OpenSession", rv);
-	if ((sessionInfo.state & CKS_RO_USER_FUNCTIONS) == 0) {
-		printf("Decryption: not logged in, skipping decryption tests\n");
+	if (!(sessionInfo.state & CKS_RW_USER_FUNCTIONS)) {
+		printf("Decryption: not a R/W session, skipping decryption tests\n");
 		return errors;
 	}
 
@@ -3986,12 +5169,16 @@ static int test_decrypt(CK_SESSION_HANDLE sess)
 		return errors;
 	}
 
-	printf("Decryption (RSA)\n");
+	printf("Decryption (currently only for RSA)\n");
 	for (j = 0; find_object(sess, CKO_PRIVATE_KEY, &privKeyObject, NULL, 0, j); j++) {
 		printf("  testing key %ld ", j);
 		if ((label = getLABEL(sess, privKeyObject, NULL)) != NULL) {
 			printf("(%s) ", label);
 			free(label);
+		}
+		if (getKEY_TYPE(sess, privKeyObject) != CKK_RSA) {
+			printf(" -- non-RSA, skipping\n");
+			continue;
 		}
 		if (!getDECRYPT(sess, privKeyObject)) {
 			printf(" -- can't be used to decrypt, skipping\n");
@@ -4001,7 +5188,6 @@ static int test_decrypt(CK_SESSION_HANDLE sess)
 
 #ifndef ENABLE_OPENSSL
 		printf("No OpenSSL support, unable to validate decryption\n");
-		n = 0;
 #else
 		for (n = 0; n < num_mechs; n++) {
 			errors += encrypt_decrypt(sess, mechs[n], privKeyObject);
@@ -4131,18 +5317,18 @@ static int p11_test(CK_SESSION_HANDLE session)
  * cert request + some other tests, writing certs and changing
  * some attributes.
  */
-static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
+static CK_SESSION_HANDLE test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 {
 	CK_MECHANISM		mech = {CKM_RSA_PKCS, NULL_PTR, 0};
 	CK_MECHANISM_TYPE	*mech_type = NULL;
 	CK_OBJECT_HANDLE	pub_key, priv_key;
 	CK_ULONG		i, num_mechs = 0;
 	CK_RV			rv;
-	CK_BYTE			buf[20], *tmp, *mod;
+	CK_BYTE			buf[20], *tmp;
 	CK_BYTE			md5_and_digestinfo[34] = "\x30\x20\x30\x0c\x06\x08\x2a\x86\x48\x86\xf7\x0d\x02\x05\x05\x00\x04\x10";
 	CK_BYTE			*data, sig[512];
 	CK_ULONG		data_len, sig_len;
-	CK_BYTE 		id[] = "abcdefghijklmnopqrst";
+	CK_BYTE			id[] = "abcdefghijklmnopqrst";
 	CK_ULONG		id_len = 20, mod_len = 0;
 	CK_BYTE			*label = (CK_BYTE *) "Just a label";
 	CK_ULONG		label_len = 12;
@@ -4151,8 +5337,16 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 		{CKA_LABEL, label, label_len},
 		{CKA_SUBJECT, (void *) "This won't be used in our lib", 29}
 	};
-	FILE                    *f;
+	FILE			*f;
 
+	if (!opt_object_id_len) {
+		fprintf(stderr, "ERR: must give an ID, e.g.: --id 01\n");
+		return session;
+	}
+	if (!opt_key_type) {
+		printf("ERR: must give an RSA key type, e.g.: --key-type RSA:1024\n");
+		return session;
+	}
 	printf("\n*** We already opened a session and logged in ***\n");
 
 	num_mechs = get_mechanisms(slot, &mech_type, -1);
@@ -4161,13 +5355,13 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 			break;
 	}
 	if (i == num_mechs) {
-		printf("ERR: no \"CKM_RSA_PKCS_KEY_PAIR_GEN\" found in the mechanism list\n");
-		return;
+		fprintf(stderr, "ERR: no \"CKM_RSA_PKCS_KEY_PAIR_GEN\" found in the mechanism list\n");
+		return session;
 	}
 
 	f = fopen(opt_file_to_write, "rb");
 	if (f == NULL)
-		util_fatal("Couldn't open file \"%s\"\n", opt_file_to_write);
+		util_fatal("Couldn't open file \"%s\"", opt_file_to_write);
 	fclose(f);
 
 	/* Get for a not-yet-existing ID */
@@ -4176,21 +5370,23 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 
 	printf("\n*** Generating a %s key pair ***\n", opt_key_type);
 
-	if (!gen_keypair(session, &pub_key, &priv_key, opt_key_type))
-		return;
+	if (!gen_keypair(slot, session, &pub_key, &priv_key, opt_key_type)) {
+		printf("ERR: cannot generate new key pair\n");
+		return session;
+	}
 
 	tmp = getID(session, priv_key, (CK_ULONG *) &opt_object_id_len);
-	if (opt_object_id == NULL || opt_object_id_len == 0) {
-		printf("ERR: newly generated private key has no (or an empty) CKA_ID\n");
-		return;
+	if (opt_object_id_len == 0) {
+		fprintf(stderr, "ERR: newly generated private key has no (or an empty) CKA_ID\n");
+		return session;
 	}
 	memcpy(opt_object_id, tmp, opt_object_id_len);
 
 	/* This is done in NSS */
-	mod = getMODULUS(session, priv_key, &mod_len);
+	getMODULUS(session, priv_key, &mod_len);
 	if (mod_len < 5 || mod_len > 10000) { /* should be resonable limits */
-		printf("ERR: GetAttribute(privkey, CKA_MODULUS) doesn't seem to work\n");
-		return;
+		fprintf(stderr, "ERR: GetAttribute(privkey, CKA_MODULUS) doesn't seem to work\n");
+		return session;
 	}
 
 	printf("\n*** Changing the CKA_ID of private and public key into one of 20 bytes ***\n");
@@ -4210,14 +5406,17 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	rv = p11->C_SignInit(session, &mech, priv_key);
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, priv_key))
+		login(session,CKU_CONTEXT_SPECIFIC);
+
 	rv = p11->C_Sign(session, data, data_len, NULL, &sig_len);
 	if (rv != CKR_OK)
 		p11_fatal("C_Sign", rv);
 	sig_len = 20;
 	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_BUFFER_TOO_SMALL) {
-		printf("ERR: C_Sign() didn't return CKR_BUFFER_TO_SMALL but %s\n", CKR2Str(rv));
-		return;
+		fprintf(stderr, "ERR: C_Sign() didn't return CKR_BUFFER_TO_SMALL but %s\n", CKR2Str(rv));
+		return session;
 	}
 	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_OK)
@@ -4237,9 +5436,12 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	data = md5_and_digestinfo;
 	data_len = 20;
 	rv = p11->C_SignInit(session, &mech, priv_key);
-	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, priv_key))
+		login(session,CKU_CONTEXT_SPECIFIC);
+
+	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_OK)
 		p11_fatal("C_Sign", rv);
 
@@ -4248,6 +5450,15 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	rv = p11->C_SetAttributeValue(session, pub_key, attribs, 3);
 	if (rv != CKR_OK)
 		p11_fatal("C_SetAttributeValue", rv);
+
+	printf("*** Deleting the private and the public key again ***\n");
+
+	rv = p11->C_DestroyObject(session, priv_key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DestroyObject()", rv);
+	rv = p11->C_DestroyObject(session, pub_key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DestroyObject()", rv);
 
 	printf("\n*** Logging off and releasing pkcs11 lib ***\n");
 
@@ -4273,7 +5484,9 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 		util_fatal("Failed to load pkcs11 module");
 
 	rv = p11->C_Initialize(NULL);
-	if (rv != CKR_OK)
+	if (rv == CKR_CRYPTOKI_ALREADY_INITIALIZED)
+		printf("\n*** Cryptoki library has already been initialized ***\n");
+	else if (rv != CKR_OK)
 		p11_fatal("C_Initialize", rv);
 
 	rv = p11->C_OpenSession(opt_slot, CKF_SERIAL_SESSION| CKF_RW_SESSION,
@@ -4290,9 +5503,12 @@ static void test_kpgen_certwrite(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	opt_object_id_len = id_len;
 	opt_object_label = (char *) label;
 	if (!write_object(session))
-		return;
+		util_fatal("Failed to write certificate");
+	if (!delete_object(session))
+		util_fatal("Failed to delete certificate");
 
 	printf("\n==> OK, successfull! Should work with Mozilla\n");
+	return session;
 }
 
 
@@ -4303,7 +5519,7 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	CK_OBJECT_HANDLE	pub_key, priv_key;
 	CK_ULONG		i, num_mechs = 0;
 	CK_RV			rv;
-	CK_BYTE			*tmp, *ec_params, *ec_point;
+	CK_BYTE			*tmp;
 	CK_BYTE			*data_to_sign = (CK_BYTE *)"My Heart's in the Highland";
 	CK_BYTE			*data, sig[512];
 	CK_ULONG		data_len, sig_len;
@@ -4317,6 +5533,15 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 		{CKA_SUBJECT, (void *) "This won't be used in our lib", 29}
 	};
 
+	if (!opt_object_id_len) {
+		fprintf(stderr, "ERR: must give an ID, e.g.: --id 01\n");
+		return;
+	}
+	if (!opt_key_type) {
+		fprintf(stderr, "ERR: must give an EC key type, e.g.: --key-type EC:secp256r1\n");
+		return;
+	}
+
 	printf("\n*** We already opened a session and logged in ***\n");
 
 	num_mechs = get_mechanisms(slot, &mech_type, -1);
@@ -4324,28 +5549,28 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 		if (mech_type[i] == CKM_EC_KEY_PAIR_GEN)
 			break;
 	if (i == num_mechs) {
-		printf("ERR: no 'CKM_EC_KEY_PAIR_GEN' found in the mechanism list\n");
-		return;
+		printf("warning: no 'CKM_EC_KEY_PAIR_GEN' found in the mechanism list\n");
+		//return;
 	}
 
 	printf("*** Generating EC key pair ***\n");
-	if (!gen_keypair(session, &pub_key, &priv_key, opt_key_type))
+	if (!gen_keypair(slot, session, &pub_key, &priv_key, opt_key_type))
 		return;
 
 	tmp = getID(session, priv_key, (CK_ULONG *) &opt_object_id_len);
-	if (opt_object_id == NULL || opt_object_id_len == 0) {
+	if (opt_object_id_len == 0) {
 		printf("ERR: newly generated private key has no (or an empty) CKA_ID\n");
 		return;
 	}
 	memcpy(opt_object_id, tmp, opt_object_id_len);
 
 	/* This is done in NSS */
-	ec_params = getEC_PARAMS(session, priv_key, &ec_params_len);
+	getEC_PARAMS(session, priv_key, &ec_params_len);
 	if (ec_params_len < 5 || ec_params_len > 10000) {
 		printf("ERR: GetAttribute(privkey, CKA_EC_PARAMS) doesn't seem to work\n");
 		return;
 	}
-	ec_point = getEC_POINT(session, pub_key, &ec_point_len);
+	getEC_POINT(session, pub_key, &ec_point_len);
 	if (ec_point_len < 5 || ec_point_len > 10000) {
 		printf("ERR: GetAttribute(pubkey, CKA_EC_POINT) doesn't seem to work\n");
 		return;
@@ -4354,28 +5579,40 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	printf("*** Changing the CKA_ID of private and public key into one of 20 bytes ***\n");
 	rv = p11->C_SetAttributeValue(session, priv_key, attribs, 1);
 	if (rv != CKR_OK)
-		p11_fatal("C_SetAttributeValue(priv_key)", rv);
+		p11_warn("C_SetAttributeValue(priv_key)", rv);
 
 	rv = p11->C_SetAttributeValue(session, pub_key, attribs, 1);
 	if (rv != CKR_OK)
-		p11_fatal("C_SetAttributeValue(pub_key)", rv);
+		p11_warn("C_SetAttributeValue(pub_key)", rv);
 
-
-	printf("*** Do a signature ***\n");
+	printf("*** Doing a signature ***\n");
 	data = data_to_sign;
-	data_len = sizeof(data_to_sign);
+	data_len = strlen((char *)data_to_sign);
 	rv = p11->C_SignInit(session, &mech, priv_key);
 	if (rv != CKR_OK)
 		p11_fatal("C_SignInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, priv_key))
+		login(session,CKU_CONTEXT_SPECIFIC);
 	rv = p11->C_Sign(session, data, data_len, NULL, &sig_len);
 	if (rv != CKR_OK)
 		p11_fatal("C_Sign", rv);
-	sig_len = 20;
+	sig_len -= 20;
 	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_BUFFER_TOO_SMALL) {
-		printf("ERR: C_Sign() didn't return CKR_BUFFER_TO_SMALL but %s\n", CKR2Str(rv));
-		return;
+		printf("warning: C_Sign() didn't return CKR_BUFFER_TO_SMALL but %s\n", CKR2Str(rv));
+		// return;
 	}
+	sig_len += 20;
+	// re-doing C_SignInit after C_SignFinal to avoid CKR_OPERATION_NOT_INITIALIZED for CardOS
+	rv = p11->C_SignFinal(session, sig, &sig_len);
+	if (rv != CKR_OK) {
+		p11_warn("C_SignFinal", rv);
+	}
+	rv = p11->C_SignInit(session, &mech, priv_key);
+	if (rv != CKR_OK)
+		p11_fatal("C_SignInit", rv);
+	if (getALWAYS_AUTHENTICATE(session, priv_key))
+		login(session,CKU_CONTEXT_SPECIFIC);
 	rv = p11->C_Sign(session, data, data_len, sig, &sig_len);
 	if (rv != CKR_OK)
 		p11_fatal("C_Sign", rv);
@@ -4383,11 +5620,73 @@ static void test_ec(CK_SLOT_ID slot, CK_SESSION_HANDLE session)
 	printf("*** Changing the CKA_LABEL, CKA_ID and CKA_SUBJECT of the public key ***\n");
 	rv = p11->C_SetAttributeValue(session, pub_key, attribs, 3);
 	if (rv != CKR_OK)
-		p11_fatal("C_SetAttributeValue", rv);
+		p11_warn("C_SetAttributeValue(pub_key)", rv);
+
+	printf("*** Deleting the private and the public key again ***\n");
+	rv = p11->C_DestroyObject(session, priv_key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DestroyObject()", rv);
+	rv = p11->C_DestroyObject(session, pub_key);
+	if (rv != CKR_OK)
+		p11_fatal("C_DestroyObject()", rv);
 
 	printf("==> OK\n");
 }
 
+#ifndef _WIN32
+static void test_fork(void)
+{
+	CK_RV rv;
+	pid_t pid = fork();
+
+	if (!pid) {
+		printf("*** Calling C_Initialize in forked child process ***\n");
+		rv = p11->C_Initialize(NULL);
+		if (rv != CKR_OK)
+			p11_fatal("C_Initialize in child\n", rv);
+		exit(0);
+	} else if (pid < 0) {
+		util_fatal("Failed to fork for test: %s", strerror(errno));
+	} else {
+		int st;
+		waitpid(pid, &st, 0);
+		if (!WIFEXITED(st) || WEXITSTATUS(st))
+			util_fatal("Child process exited with status %d", st);
+	}
+
+}
+#endif
+
+static void generate_random(CK_SESSION_HANDLE session)
+{
+	CK_RV rv;
+	CK_BYTE *buf;
+	FILE *out;
+
+	buf = malloc(opt_random_bytes);
+	if (!buf)
+		util_fatal("Not enough memory to allocate random data buffer");
+
+	rv = p11->C_GenerateRandom(session, buf, opt_random_bytes);
+	if (rv != CKR_OK)
+		util_fatal("Could not generate random bytes");
+
+	if (opt_output) {
+		out = fopen(opt_output, "wb");
+		if (out==NULL)
+			util_fatal("Cannot open '%s'", opt_output);
+	}
+	else
+		out = stdout;
+
+	if (fwrite(buf, 1, opt_random_bytes, out) != opt_random_bytes)
+		util_fatal("Cannot write to '%s'", opt_output);
+
+	if (opt_output)
+		fclose(out);
+
+	free(buf);
+}
 
 static const char *p11_flag_names(struct flag_info *list, CK_FLAGS value)
 {
@@ -4397,8 +5696,8 @@ static const char *p11_flag_names(struct flag_info *list, CK_FLAGS value)
 	buffer[0] = '\0';
 	while (list->value) {
 		if (list->value & value) {
-			strcat(buffer, sepa);
-			strcat(buffer, list->name);
+			strlcat(buffer, sepa, sizeof buffer);
+			strlcat(buffer, list->name, sizeof buffer);
 			value &= ~list->value;
 			sepa = ", ";
 		}
@@ -4427,15 +5726,20 @@ static const char *p11_slot_info_flags(CK_FLAGS value)
 static const char *p11_token_info_flags(CK_FLAGS value)
 {
 	static struct flag_info	slot_flags[] = {
-		{ CKF_RNG, "rng" },
-		{ CKF_WRITE_PROTECTED, "readonly" },
 		{ CKF_LOGIN_REQUIRED, "login required" },
-		{ CKF_USER_PIN_INITIALIZED, "PIN initialized" },
 		{ CKF_PROTECTED_AUTHENTICATION_PATH, "PIN pad present" },
+		{ CKF_RNG, "rng" },
+		{ CKF_SO_PIN_COUNT_LOW, "SO PIN count low" },
+		{ CKF_SO_PIN_FINAL_TRY, "final SO PIN try" },
+		{ CKF_SO_PIN_LOCKED, "SO PIN locked" },
+		{ CKF_SO_PIN_TO_BE_CHANGED, "SO PIN to be changed"},
 		{ CKF_TOKEN_INITIALIZED, "token initialized" },
 		{ CKF_USER_PIN_COUNT_LOW, "user PIN count low" },
 		{ CKF_USER_PIN_FINAL_TRY, "final user PIN try" },
+		{ CKF_USER_PIN_INITIALIZED, "PIN initialized" },
 		{ CKF_USER_PIN_LOCKED, "user PIN locked" },
+		{ CKF_USER_PIN_TO_BE_CHANGED, "user PIN to be changed"},
+		{ CKF_WRITE_PROTECTED, "readonly" },
 		{ 0, NULL }
 	};
 
@@ -4467,7 +5771,7 @@ static void p11_fatal(const char *func, CK_RV rv)
 	if (module)
 		C_UnloadModule(module);
 
-	util_fatal("PKCS11 function %s failed: rv = %s (0x%0x)\n", func, CKR2Str(rv), (unsigned int) rv);
+	util_fatal("PKCS11 function %s failed: rv = %s (0x%0x)", func, CKR2Str(rv), (unsigned int) rv);
 }
 
 static void p11_warn(const char *func, CK_RV rv)
@@ -4484,6 +5788,7 @@ static void p11_perror(const char *msg, CK_RV rv)
 static int hex_to_bin(const char *in, unsigned char *out, size_t *outlen)
 {
 	size_t left, count = 0;
+	int nybbles = 2;
 
 	if (in == NULL || *in == '\0') {
 		*outlen = 0;
@@ -4492,8 +5797,10 @@ static int hex_to_bin(const char *in, unsigned char *out, size_t *outlen)
 
 	left = *outlen;
 
+	if (strlen(in) % 2)
+		nybbles = 1; // any leading zero in output should be in most-significant byte, not last one!
 	while (*in != '\0') {
-		int byte = 0, nybbles = 2;
+		int byte = 0;
 
 		while (nybbles-- && *in && *in != ':') {
 			char c;
@@ -4508,7 +5815,7 @@ static int hex_to_bin(const char *in, unsigned char *out, size_t *outlen)
 			if ('A' <= c && c <= 'F')
 				c = c - 'A' + 10;
 			else {
-				printf("hex_to_bin(): invalid char '%c' in hex string\n", c);
+				fprintf(stderr, "hex_to_bin(): invalid char '%c' in hex string\n", c);
 				*outlen = 0;
 				return 0;
 			}
@@ -4517,16 +5824,28 @@ static int hex_to_bin(const char *in, unsigned char *out, size_t *outlen)
 		if (*in == ':')
 			in++;
 		if (left <= 0) {
-			printf("hex_to_bin(): hex string too long");
+			fprintf(stderr, "hex_to_bin(): hex string too long");
 			*outlen = 0;
 			return 0;
 		}
 		out[count++] = (unsigned char) byte;
 		left--;
+		nybbles = 2;
 	}
 
 	*outlen = count;
 	return 1;
+}
+
+static void pseudo_randomize(unsigned char *data, size_t dataLen)
+{
+	size_t i = 0;
+	/* initialization with some data */
+	while (i < dataLen) {
+		*data = rand() & 0xFF;
+		data++;
+		i++;
+	}
 }
 
 static struct mech_info	p11_mechanisms[] = {
@@ -4534,9 +5853,10 @@ static struct mech_info	p11_mechanisms[] = {
       { CKM_RSA_PKCS,		"RSA-PKCS",	NULL },
       { CKM_RSA_9796,		"RSA-9796",	NULL },
       { CKM_RSA_X_509,		"RSA-X-509",	NULL },
-      { CKM_MD2_RSA_PKCS,	"MD2-RSA-PKCS", 	NULL },
-      { CKM_MD5_RSA_PKCS,	"MD5-RSA-PKCS", 	"rsa-md5" },
+      { CKM_MD2_RSA_PKCS,	"MD2-RSA-PKCS",	NULL },
+      { CKM_MD5_RSA_PKCS,	"MD5-RSA-PKCS",	"rsa-md5" },
       { CKM_SHA1_RSA_PKCS,	"SHA1-RSA-PKCS",	"rsa-sha1" },
+      { CKM_SHA224_RSA_PKCS,	"SHA224-RSA-PKCS",	"rsa-sha224" },
       { CKM_SHA256_RSA_PKCS,	"SHA256-RSA-PKCS",	"rsa-sha256" },
       { CKM_SHA384_RSA_PKCS,	"SHA384-RSA-PKCS",	"rsa-sha384" },
       { CKM_SHA512_RSA_PKCS,	"SHA512-RSA-PKCS",	"rsa-sha512" },
@@ -4547,10 +5867,11 @@ static struct mech_info	p11_mechanisms[] = {
       { CKM_RSA_X9_31,		"RSA-X9-31",	NULL },
       { CKM_SHA1_RSA_X9_31,	"SHA1-RSA-X9-31",	NULL },
       { CKM_RSA_PKCS_PSS,	"RSA-PKCS-PSS",	NULL },
-      { CKM_SHA1_RSA_PKCS_PSS,	"SHA1-RSA-PKCS-PSS",	NULL },
-      { CKM_SHA256_RSA_PKCS,	"SHA256-RSA-PKCS-PSS",	NULL },
-      { CKM_SHA384_RSA_PKCS,	"SHA384-RSA-PKCS-PSS",	NULL },
-      { CKM_SHA512_RSA_PKCS,	"SHA512-RSA-PKCS-PSS",	NULL },
+      { CKM_SHA1_RSA_PKCS_PSS,	"SHA1-RSA-PKCS-PSS",	"rsa-pss-sha1" },
+      { CKM_SHA224_RSA_PKCS_PSS,"SHA224-RSA-PKCS-PSS",	"rsa-pss-sha224" },
+      { CKM_SHA256_RSA_PKCS_PSS,"SHA256-RSA-PKCS-PSS",	"rsa-pss-sha256" },
+      { CKM_SHA384_RSA_PKCS_PSS,"SHA384-RSA-PKCS-PSS",	"rsa-pss-sha384" },
+      { CKM_SHA512_RSA_PKCS_PSS,"SHA512-RSA-PKCS-PSS",	"rsa-pss-sha512" },
       { CKM_DSA_KEY_PAIR_GEN,	"DSA-KEY-PAIR-GEN",	NULL },
       { CKM_DSA,		"DSA",	NULL },
       { CKM_DSA_SHA1,		"DSA-SHA1", NULL },
@@ -4596,9 +5917,14 @@ static struct mech_info	p11_mechanisms[] = {
       { CKM_SHA_1,		"SHA-1", NULL },
       { CKM_SHA_1_HMAC,		"SHA-1-HMAC", NULL },
       { CKM_SHA_1_HMAC_GENERAL,	"SHA-1-HMAC-GENERAL", NULL },
+      { CKM_SHA224,		"SHA224", NULL },
+      { CKM_SHA224_HMAC,	"SHA224-HMAC", NULL },
       { CKM_SHA256,		"SHA256", NULL },
+      { CKM_SHA256_HMAC,	"SHA256-HMAC", NULL },
       { CKM_SHA384,		"SHA384", NULL },
+      { CKM_SHA384_HMAC,	"SHA384-HMAC", NULL },
       { CKM_SHA512,		"SHA512", NULL },
+      { CKM_SHA512_HMAC,	"SHA512-HMAC", NULL },
       { CKM_RIPEMD128,		"RIPEMD128", NULL },
       { CKM_RIPEMD128_HMAC,	"RIPEMD128-HMAC", NULL },
       { CKM_RIPEMD128_HMAC_GENERAL,"RIPEMD128-HMAC-GENERAL", NULL },
@@ -4694,6 +6020,10 @@ static struct mech_info	p11_mechanisms[] = {
       { CKM_ECDSA_KEY_PAIR_GEN,	"ECDSA-KEY-PAIR-GEN", NULL },
       { CKM_ECDSA,		"ECDSA", NULL },
       { CKM_ECDSA_SHA1,		"ECDSA-SHA1", NULL },
+      { CKM_ECDSA_SHA224,	"ECDSA-SHA224", NULL },
+      { CKM_ECDSA_SHA256,	"ECDSA-SHA256", NULL },
+      { CKM_ECDSA_SHA384,	"ECDSA-SHA384", NULL },
+      { CKM_ECDSA_SHA512,	"ECDSA-SHA512", NULL },
       { CKM_ECDH1_DERIVE,	"ECDH1-DERIVE", NULL },
       { CKM_ECDH1_COFACTOR_DERIVE,"ECDH1-COFACTOR-DERIVE", NULL },
       { CKM_ECMQV_DERIVE,	"ECMQV-DERIVE", NULL },
@@ -4720,6 +6050,15 @@ static struct mech_info	p11_mechanisms[] = {
       { 0, NULL, NULL }
 };
 
+static struct mech_info	p11_mgf[] = {
+      { CKG_MGF1_SHA1,		"MGF1-SHA1", NULL },
+      { CKG_MGF1_SHA224,	"MGF1-SHA224", NULL },
+      { CKG_MGF1_SHA256,	"MGF1-SHA256", NULL },
+      { CKG_MGF1_SHA384,	"MGF1-SHA384", NULL },
+      { CKG_MGF1_SHA512,	"MGF1-SHA512", NULL },
+      { 0, NULL, NULL }
+};
+
 static const char *p11_mechanism_to_name(CK_MECHANISM_TYPE mech)
 {
 	static char temp[64];
@@ -4729,7 +6068,7 @@ static const char *p11_mechanism_to_name(CK_MECHANISM_TYPE mech)
 		if (mi->mech == mech)
 			return mi->name;
 	}
-	snprintf(temp, sizeof(temp), "mechtype-%lu", (unsigned long) mech);
+	snprintf(temp, sizeof(temp), "mechtype-0x%lX", (unsigned long) mech);
 	return temp;
 }
 
@@ -4742,8 +6081,32 @@ static CK_MECHANISM_TYPE p11_name_to_mechanism(const char *name)
 		 || (mi->short_name && !strcasecmp(mi->short_name, name)))
 			return mi->mech;
 	}
-	util_fatal("Unknown PKCS11 mechanism \"%s\"\n", name);
+	util_fatal("Unknown PKCS11 mechanism \"%s\"", name);
 	return 0; /* gcc food */
+}
+
+static CK_RSA_PKCS_MGF_TYPE p11_name_to_mgf(const char *name)
+{
+	struct mech_info *mi;
+
+	for (mi = p11_mgf; mi->name; mi++) {
+		if (!strcasecmp(mi->name, name))
+			return mi->mech;
+	}
+	util_fatal("Unknown PKCS11 MGF \"%s\"", name);
+}
+
+static const char *p11_mgf_to_name(CK_RSA_PKCS_MGF_TYPE mgf)
+{
+	static char temp[64];
+	struct mech_info *mi;
+
+	for (mi = p11_mgf; mi->name; mi++) {
+		if (mi->mech == mgf)
+			return mi->name;
+	}
+	snprintf(temp, sizeof(temp), "mgf-0x%lX", (unsigned long) mgf);
+	return temp;
 }
 
 static const char * CKR2Str(CK_ULONG res)
