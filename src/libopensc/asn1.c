@@ -471,7 +471,7 @@ const u8 *sc_asn1_find_tag(sc_context_t *ctx, const u8 * buf,
 
 	*taglen_in = 0;
 	while (left >= 2) {
-		unsigned int cla, tag, mask = 0xff00;
+		unsigned int cla = 0, tag, mask = 0xff00;
 
 		buf = p;
 		/* read a tag */
@@ -504,7 +504,7 @@ const u8 *sc_asn1_skip_tag(sc_context_t *ctx, const u8 ** buf, size_t *buflen,
 {
 	const u8 *p = *buf;
 	size_t len = *buflen, taglen;
-	unsigned int cla, tag;
+	unsigned int cla = 0, tag;
 
 	if (sc_asn1_read_tag((const u8 **) &p, len, &cla, &tag, &taglen) != SC_SUCCESS)
 		return NULL;
@@ -695,7 +695,7 @@ int sc_asn1_decode_integer(const u8 * inbuf, size_t inlen, int *out)
 	int    a = 0;
 	size_t i;
 
-	if (inlen > sizeof(int))
+	if (inlen > sizeof(int) || inlen == 0)
 		return SC_ERROR_INVALID_ASN1_OBJECT;
 	if (inbuf[0] & 0x80)
 		a = -1;
